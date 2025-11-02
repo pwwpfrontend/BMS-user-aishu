@@ -1,0 +1,27 @@
+runtime: nodejs20
+instance_class: F2
+service: bms-user
+env: standard
+entrypoint: npm start
+ 
+ 
+ 
+handlers:
+  # Serve all static files from the build/static directory
+  - url: /static/(.*)
+    secure: always
+    static_files: build/static/\1
+    upload: build/static/.*
+ 
+  # Serve files from the root directory
+  - url: /(.*\.(json|ico|js|css|png|jpg|jpeg|gif|svg))$
+    static_files: build/\1
+    upload: build/.*\.(json|ico|js|css|png|jpg|jpeg|gif|svg)$
+ 
+  # Serve the React app's index.html for all other routes
+  - url: /.*
+    static_files: build/index.html
+    upload: build/index.html
+    secure: always
+
+    
