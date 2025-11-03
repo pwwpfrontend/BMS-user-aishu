@@ -1,13 +1,21 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Calendar, Grid3x3, ChevronLeft, ChevronRight, ChevronDown, SlidersHorizontal } from 'lucide-react';
+import { DateTime } from 'luxon';
+import { viewAllResources, getResourceScheduleInfo, getResourceBookingsForDate } from '../utils/bookingApi';
+import { generateSlotGroups, getWeekdayName, formatDateToYYYYMMDD, dateStringToZonedDate, parseDurationToMinutes } from '../utils/time';
 
 // Resource Card Component for Grid View
-const ResourceCard = ({ resource, onBook }) => {
+const ResourceCard = ({ resource, onBook, selectedDate }) => {
   const [hoveredSlot, setHoveredSlot] = useState(null);
+  const [slotGroups, setSlotGroups] = useState([]);
+  const [loading, setLoading] = useState(false);
 
-  // Generate time slots from 08:00 to 23:00 (every 30 minutes)
-  const generateTimeSlots = () => {
+  // Flatten all slots from all groups for rendering
+  const allSlots = slotGroups.flatMap(group => group.slots);
+
+  // Generate display time slots (for UI visualization)
+  const generateDisplayTimeSlots = () => {
     const slots = [];
     for (let hour = 8; hour < 23; hour++) {
       slots.push({ time: `${hour.toString().padStart(2, '0')}:00`, hour, minute: 0 });
@@ -16,27 +24,83 @@ const ResourceCard = ({ resource, onBook }) => {
     return slots;
   };
 
-  const timeSlots = generateTimeSlots();
+  const displaySlots = generateDisplayTimeSlots();
 
-  // Get slot status based on resource data
-  const getSlotStatus = (slot) => {
-    const slotTime = slot.hour * 60 + slot.minute;
-    
-    // Check if slot is in booked ranges
-    for (const range of resource.bookedSlots) {
-      if (slotTime >= range.start && slotTime < range.end) {
-        return 'booked';
+  // Load schedule and bookings when resource or date changes
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadSlots = async () => {
+      if (!resource || !selectedDate) return;
+
+      setLoading(true);
+      try {
+        // Get timezone - from resource's associated location if available, otherwise UTC
+        const timezone = 'Asia/Hong_Kong'; // Default timezone based on API response
+        
+        // Parse selected date
+        const dateObj = DateTime.fromFormat(selectedDate, 'dd/MM/yyyy', { zone: timezone });
+        const weekday = getWeekdayName(dateObj, timezone);
+        const dateStr = formatDateToYYYYMMDD(dateObj);
+
+        // Fetch schedule blocks for this resource (returns all weekdays)
+        const scheduleResponse = await getResourceScheduleInfo(resource.name);
+        const allScheduleBlocks = scheduleResponse?.schedule_blocks || [];
+        
+        // Filter schedule blocks for the selected weekday
+        const scheduleBlocks = allScheduleBlocks.filter(block => 
+          block.weekday.toLowerCase() === weekday.toLowerCase()
+        );
+
+        // Fetch bookings for this resource on this date
+        const bookings = await getResourceBookingsForDate(resource.id, dateStr);
+
+        if (!isMounted) return;
+
+        // Determine slot step from service
+        const stepMinutes = resource.service?.duration_step 
+          ? parseDurationToMinutes(resource.service.duration_step) 
+          : 15;
+
+        // Generate slot groups
+        const groups = generateSlotGroups(
+          scheduleBlocks,
+          bookings,
+          dateObj,
+          stepMinutes,
+          resource.max_simultaneous_bookings || 1,
+          timezone
+        );
+
+        setSlotGroups(groups);
+      } catch (error) {
+        console.error('Error loading slots:', error);
+      } finally {
+        if (isMounted) setLoading(false);
       }
-    }
+    };
+
+    loadSlots();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [resource, selectedDate]);
+
+  // Get slot status based on real data
+  const getSlotStatus = (displaySlot) => {
+    const slotTime = displaySlot.hour * 60 + displaySlot.minute;
     
-    // Check if slot is in available ranges
-    for (const range of resource.availableSlots) {
-      if (slotTime >= range.start && slotTime < range.end) {
-        return 'available';
-      }
+    // Find matching slot in allSlots
+    const matchingSlot = allSlots.find(s => 
+      s.startMin <= slotTime && s.endMin > slotTime
+    );
+
+    if (!matchingSlot) {
+      return 'unavailable';
     }
-    
-    return 'unavailable';
+
+    return matchingSlot.isBooked ? 'booked' : 'available';
   };
 
   return (
@@ -103,33 +167,39 @@ const ResourceCard = ({ resource, onBook }) => {
 
           {/* Interactive Time Slots - At Bottom */}
           <div className="relative">
-            <div className="flex items-center gap-0.5 mb-2">
-              {timeSlots.map((slot, index) => {
-                const status = getSlotStatus(slot);
-                return (
-                  <div
-                    key={index}
-                    className={`h-5 flex-1 transition-all ${
-                      status === 'available' 
-                        ? 'hover:opacity-80 cursor-pointer' 
-                        : status === 'booked'
-                        ? 'cursor-not-allowed'
-                        : 'bg-gray-200 cursor-not-allowed'
-                    }`}
-                    style={
-                      status === 'available' 
-                        ? { backgroundColor: '#96D395' }
-                        : status === 'booked'
-                        ? { backgroundColor: '#D09090' }
-                        : {}
-                    }
-                    onMouseEnter={() => setHoveredSlot(slot)}
-                    onMouseLeave={() => setHoveredSlot(null)}
-                    title={`${slot.time} - ${status}`}
-                  />
-                );
-              })}
-            </div>
+            {loading ? (
+              <div className="text-xs text-gray-500 mb-2" style={{ fontFamily: 'Inter' }}>
+                Loading schedule...
+              </div>
+            ) : (
+              <div className="flex items-center gap-0.5 mb-2">
+                {displaySlots.map((slot, index) => {
+                  const status = getSlotStatus(slot);
+                  return (
+                    <div
+                      key={index}
+                      className={`h-5 flex-1 transition-all ${
+                        status === 'available' 
+                          ? 'hover:opacity-80 cursor-pointer' 
+                          : status === 'booked'
+                          ? 'cursor-not-allowed'
+                          : 'bg-gray-200 cursor-not-allowed'
+                      }`}
+                      style={
+                        status === 'available' 
+                          ? { backgroundColor: '#96D395' }
+                          : status === 'booked'
+                          ? { backgroundColor: '#D09090' }
+                          : {}
+                      }
+                      onMouseEnter={() => setHoveredSlot(slot)}
+                      onMouseLeave={() => setHoveredSlot(null)}
+                      title={`${slot.time} - ${status}`}
+                    />
+                  );
+                })}
+              </div>
+            )}
 
             {/* Time Labels */}
             <div className="flex justify-between text-xs text-gray-500" style={{ fontFamily: 'Inter' }}>
@@ -173,90 +243,83 @@ const CalendarEvent = ({ event, onClick }) => {
 export default function Bookings() {
   const navigate = useNavigate();
   const [view, setView] = useState('grid'); // 'grid' or 'calendar'
-  const [selectedDate, setSelectedDate] = useState('21/10/2025');
+  
+  // Set default date to today
+  const today = DateTime.now();
+  const [selectedDate, setSelectedDate] = useState(today.toFormat('dd/MM/yyyy'));
   const [startTime, setStartTime] = useState('3:00 PM');
   const [endTime, setEndTime] = useState('4:00 PM');
   const [resourceFilter, setResourceFilter] = useState('All Resources');
   const [isResourceFilterOpen, setIsResourceFilterOpen] = useState(false);
   const [isOtherFiltersOpen, setIsOtherFiltersOpen] = useState(false);
   
+  // Resources state
+  const [resources, setResources] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  
   // Calendar state
-  const [currentMonth, setCurrentMonth] = useState('October 2025');
+  const [currentMonth, setCurrentMonth] = useState(today.toFormat('MMMM yyyy'));
   const [calendarView, setCalendarView] = useState('Month'); // Month, Week, Day, 30 days
 
   const resourceOptions = ['All Resources', 'Meeting Rooms', 'Event Halls', 'Co-Working Spaces'];
 
-  // Sample resources data
-  const resources = [
-    {
-      id: 1,
-      name: '2A Meeting Room - Large',
-      capacity: 8,
-      pricing: 'Free of Charge',
-      type: 'Meeting Room',
-      note: '',
-      amenities: 'Air conditioning, Internet, CCTV',
-      image: 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop',
-      availableSlots: [
-        { start: 8 * 60, end: 12 * 60 }, // 8:00 - 12:00
-        { start: 18 * 60, end: 20 * 60 }, // 18:00 - 20:00
-      ],
-      bookedSlots: [
-        { start: 14 * 60, end: 16 * 60 }, // 14:00 - 16:00
-      ]
-    },
-    {
-      id: 2,
-      name: '3A Meeting Room',
-      capacity: 1,
-      pricing: 'Free of Charge',
-      type: 'Meeting Room',
-      note: '',
-      amenities: 'Air conditioning, Internet, CCTV',
-      image: 'https://images.unsplash.com/photo-1497366811353-6870744d04b2?w=400&h=300&fit=crop',
-      availableSlots: [
-        { start: 8 * 60, end: 12 * 60 },
-        { start: 18 * 60, end: 22 * 60 },
-      ],
-      bookedSlots: [
-        { start: 14 * 60, end: 16 * 60 },
-      ]
-    },
-    {
-      id: 3,
-      name: 'UGA Event hall',
-      capacity: 1,
-      pricing: 'Event Hall',
-      type: 'Event Hall',
-      note: 'The booking hour must be ≥ 2-hour',
-      amenities: 'Air conditioning, Projector, Internet, Whiteboard, Large display, Security lock, Soundproof',
-      image: 'https://images.unsplash.com/photo-1497366754035-f200968a6e72?w=400&h=300&fit=crop',
-      availableSlots: [
-        { start: 8 * 60, end: 13 * 60 },
-        { start: 18 * 60, end: 21 * 60 },
-      ],
-      bookedSlots: [
-        { start: 14 * 60, end: 17 * 60 },
-      ]
-    },
-    {
-      id: 4,
-      name: '1B Meeting Room',
-      capacity: 1,
-      pricing: 'Meeting Room',
-      type: 'Meeting Room',
-      note: '',
-      amenities: 'Air conditioning, Projector, Internet, Conference phone, Standard phone, Whiteboard',
-      image: 'https://images.unsplash.com/photo-1431540015161-0bf868a2d407?w=400&h=300&fit=crop',
-      availableSlots: [
-        { start: 8 * 60, end: 14 * 60 },
-        { start: 18 * 60, end: 22 * 60 },
-      ],
-      bookedSlots: [
-        { start: 14.5 * 60, end: 17 * 60 },
-      ]
-    }
-  ];
+  // Fetch resources on mount
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchResources = async () => {
+      try {
+        const apiResources = await viewAllResources();
+        
+        if (!isMounted) return;
+
+        // Map API resources to UI format
+        const mappedResources = apiResources.map(resource => {
+          // Handle rates - it's an array of rate objects
+          let pricingDisplay = 'Free of Charge';
+          if (resource.metadata?.rates && Array.isArray(resource.metadata.rates) && resource.metadata.rates.length > 0) {
+            // Use the first rate's price_name or price
+            const firstRate = resource.metadata.rates[0];
+            if (firstRate.price_name) {
+              pricingDisplay = firstRate.price_name;
+            } else if (firstRate.price !== undefined) {
+              pricingDisplay = `$${firstRate.price}`;
+            }
+          }
+
+          return {
+            id: resource.id,
+            name: resource.name,
+            capacity: resource.metadata?.capacity || resource.max_simultaneous_bookings || 1,
+            pricing: pricingDisplay,
+            type: resource.metadata?.category || 'Resource',
+            note: resource.metadata?.resource_details?.note || '',
+            amenities: resource.metadata?.resource_details?.description || 'Standard amenities',
+            image: resource.metadata?.photo_url || 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop',
+            // Pass through full resource data
+            ...resource
+          };
+        });
+
+        setResources(mappedResources);
+        setLoading(false);
+      } catch (error) {
+        console.error('Error fetching resources:', error);
+        if (isMounted) {
+          setError(error.message || 'Failed to load resources');
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchResources();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
 
   // Sample calendar events
   const calendarEvents = {
@@ -511,13 +574,28 @@ export default function Bookings() {
         {/* Grid View */}
         {view === 'grid' && (
           <div className="space-y-6">
-            {resources.map((resource) => (
-              <ResourceCard
-                key={resource.id}
-                resource={resource}
-                onBook={handleBookResource}
-              />
-            ))}
+            {loading ? (
+              <div className="text-center py-8 text-gray-500" style={{ fontFamily: 'Inter' }}>
+                Loading resources...
+              </div>
+            ) : error ? (
+              <div className="text-center py-8 text-red-600" style={{ fontFamily: 'Inter' }}>
+                {error}
+              </div>
+            ) : resources.length === 0 ? (
+              <div className="text-center py-8 text-gray-500" style={{ fontFamily: 'Inter' }}>
+                No resources available.
+              </div>
+            ) : (
+              resources.map((resource) => (
+                <ResourceCard
+                  key={resource.id}
+                  resource={resource}
+                  selectedDate={selectedDate}
+                  onBook={handleBookResource}
+                />
+              ))
+            )}
           </div>
         )}
 

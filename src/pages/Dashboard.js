@@ -1,10 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronDown, ExternalLink } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { viewAllBookings, getResourceScheduleInfo } from '../utils/bookingApi';
+import { formatDate, formatTime } from '../utils/time';
 
 // Booking Card Component with Interactive Time Slots
-const BookingCard = ({ booking, onClick }) => {
+const BookingCard = ({ booking, onClick, currentUserEmail }) => {
   const [hoveredSlot, setHoveredSlot] = useState(null);
+  const [slotData, setSlotData] = useState({ scheduleSlots: [], bookedSlots: [] });
+  const [loading, setLoading] = useState(true);
 
   // Generate time slots from 08:00 to 23:00 (every 30 minutes)
   const generateTimeSlots = () => {
@@ -18,25 +22,149 @@ const BookingCard = ({ booking, onClick }) => {
 
   const timeSlots = generateTimeSlots();
 
-  // Get slot status based on booking data
+  // Fetch schedule and bookings for this resource
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchSlotData = async () => {
+      try {
+        // Get resource name and booking date
+        const resourceName = booking.name;
+        const bookingDate = new Date(booking.rawStartsAt || new Date());
+        const weekday = bookingDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+
+        // Fetch schedule blocks for this resource
+        const scheduleResponse = await getResourceScheduleInfo(resourceName);
+        const allScheduleBlocks = scheduleResponse?.schedule_blocks || [];
+        
+        // Filter for the current weekday
+        const todaySchedule = allScheduleBlocks.filter(block => 
+          block.weekday.toLowerCase() === weekday
+        );
+
+        // Convert schedule blocks to minute ranges
+        const scheduleSlots = [];
+        todaySchedule.forEach(block => {
+          const [startHour, startMin] = block.start_time.split(':').map(Number);
+          const [endHour, endMin] = block.end_time.split(':').map(Number);
+          const startMinutes = startHour * 60 + startMin;
+          const endMinutes = endHour * 60 + endMin;
+          scheduleSlots.push({ start: startMinutes, end: endMinutes });
+        });
+
+        // Fetch all bookings for this resource on this date
+        const allBookings = await viewAllBookings();
+        console.log(`[SlotBar] Resource: ${resourceName}, Target date: ${bookingDate.toDateString()}`);
+        console.log('[SlotBar] All bookings from API:', allBookings);
+        
+        const resourceBookings = allBookings.filter(b => {
+          const matchesResource = b.resource?.name === resourceName;
+          const bookingStart = new Date(b.starts_at);
+          const bookingStartDate = bookingStart.toDateString();
+          const targetDate = bookingDate.toDateString();
+          const matchesDate = bookingStartDate === targetDate;
+          
+          console.log(`[SlotBar] Checking booking ${b.id}:`, {
+            resourceName: b.resource?.name,
+            matchesResource,
+            bookingStartDate,
+            targetDate,
+            matchesDate,
+            starts_at: b.starts_at
+          });
+          
+          return matchesResource && matchesDate;
+        });
+        console.log('[SlotBar] Filtered resourceBookings:', resourceBookings);
+
+        // Convert bookings to minute ranges with user info
+        const bookedSlots = resourceBookings.map(b => {
+          // Parse the ISO string to get the time in the booking's timezone
+          // Format: "2025-11-04T10:30:00+08:00"
+          const startsAt = b.starts_at; // e.g., "2025-11-04T10:30:00+08:00"
+          const endsAt = b.ends_at;
+          
+          // Extract just the time part (HH:MM:SS) from the ISO string
+          // This preserves the original timezone time
+          const startTimePart = startsAt.split('T')[1].split('+')[0].split('-')[0]; // "10:30:00"
+          const endTimePart = endsAt.split('T')[1].split('+')[0].split('-')[0];
+          
+          const [startHour, startMin] = startTimePart.split(':').map(Number);
+          const [endHour, endMin] = endTimePart.split(':').map(Number);
+          
+          const startMinutes = startHour * 60 + startMin;
+          const endMinutes = endHour * 60 + endMin;
+          
+          const slotInfo = {
+            start: startMinutes,
+            end: endMinutes,
+            customerId: b.metadata?.customer_id,
+            customerName: b.metadata?.customer_name,
+            isCurrentUser: b.metadata?.customer_id === currentUserEmail
+          };
+          
+          console.log(`[SlotBar] Converted booking to slot:`, {
+            bookingId: b.id,
+            starts_at: b.starts_at,
+            ends_at: b.ends_at,
+            startTimePart,
+            endTimePart,
+            startMinutes,
+            endMinutes,
+            timeRange: `${Math.floor(startMinutes/60)}:${(startMinutes%60).toString().padStart(2,'0')} - ${Math.floor(endMinutes/60)}:${(endMinutes%60).toString().padStart(2,'0')}`
+          });
+          
+          return slotInfo;
+        });
+        
+        console.log('[SlotBar] Final bookedSlots:', bookedSlots);
+        console.log('[SlotBar] Final scheduleSlots:', scheduleSlots);
+
+        if (isMounted) {
+          setSlotData({ scheduleSlots, bookedSlots });
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error('Error fetching slot data:', error);
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchSlotData();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [booking.name, booking.rawStartsAt, currentUserEmail]);
+
+  // Get slot status based on real data
   const getSlotStatus = (slot) => {
     const slotTime = slot.hour * 60 + slot.minute;
     
-    // Check if slot is in booked ranges
-    for (const range of booking.bookedSlots) {
-      if (slotTime >= range.start && slotTime < range.end) {
-        return 'booked';
+    // Check if slot is booked
+    for (const bookedSlot of slotData.bookedSlots) {
+      if (slotTime >= bookedSlot.start && slotTime < bookedSlot.end) {
+        return { status: 'booked', booking: bookedSlot };
       }
     }
     
-    // Check if slot is in available ranges
-    for (const range of booking.availableSlots) {
-      if (slotTime >= range.start && slotTime < range.end) {
-        return 'available';
+    // Check if slot is in schedule (available)
+    for (const scheduleSlot of slotData.scheduleSlots) {
+      if (slotTime >= scheduleSlot.start && slotTime < scheduleSlot.end) {
+        return { status: 'available' };
       }
     }
     
-    return 'unavailable';
+    return { status: 'unavailable' };
+  };
+
+  // Get tooltip text for hovered slot
+  const getTooltipText = (slot) => {
+    const slotStatus = getSlotStatus(slot);
+    if (slotStatus.status === 'booked') {
+      return slotStatus.booking?.isCurrentUser ? 'Your booking' : 'Booked';
+    }
+    return `${slot.time} - ${slotStatus.status}`;
   };
 
   return (
@@ -76,33 +204,39 @@ const BookingCard = ({ booking, onClick }) => {
 
       {/* Interactive Time Slots */}
       <div className="relative">
-        <div className="flex items-center gap-0.5 mb-2">
-          {timeSlots.map((slot, index) => {
-            const status = getSlotStatus(slot);
-            return (
-              <div
-                key={index}
-                className={`h-5 flex-1 rounded-sm cursor-pointer transition-all ${
-                  status === 'available' 
-                    ? 'hover:opacity-80' 
-                    : status === 'booked'
-                    ? 'hover:opacity-80'
-                    : 'bg-gray-200 hover:bg-gray-300'
-                }`}
-                style={
-                  status === 'available' 
-                    ? { backgroundColor: '#96D395' }
-                    : status === 'booked'
-                    ? { backgroundColor: '#D09090' }
-                    : {}
-                }
-                onMouseEnter={() => setHoveredSlot(slot)}
-                onMouseLeave={() => setHoveredSlot(null)}
-                title={`${slot.time} - ${status}`}
-              />
-            );
-          })}
-        </div>
+        {loading ? (
+          <div className="text-xs text-gray-400 mb-2" style={{ fontFamily: 'Inter' }}>
+            Loading schedule...
+          </div>
+        ) : (
+          <div className="flex items-center gap-0.5 mb-2">
+            {timeSlots.map((slot, index) => {
+              const slotStatus = getSlotStatus(slot);
+              const status = slotStatus.status;
+              return (
+                <div
+                  key={index}
+                  className={`h-5 flex-1 rounded-sm cursor-pointer transition-all ${
+                    status === 'available' 
+                      ? 'hover:opacity-80' 
+                      : status === 'booked'
+                      ? 'hover:opacity-80'
+                      : 'bg-gray-200 hover:bg-gray-300'
+                  }`}
+                  style={
+                    status === 'available' 
+                      ? { backgroundColor: '#96D395' }
+                      : status === 'booked'
+                      ? { backgroundColor: '#D09090' }
+                      : {}
+                  }
+                  onMouseEnter={() => setHoveredSlot(slot)}
+                  onMouseLeave={() => setHoveredSlot(null)}
+                />
+              );
+            })}
+          </div>
+        )}
 
         {/* Time Labels */}
         <div className="flex justify-between text-xs text-gray-500" style={{ fontFamily: 'Inter' }}>
@@ -119,7 +253,7 @@ const BookingCard = ({ booking, onClick }) => {
         {/* Hover Tooltip */}
         {hoveredSlot && (
           <div className="absolute -top-10 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white text-xs px-3 py-1.5 rounded-md whitespace-nowrap" style={{ fontFamily: 'Inter' }}>
-            {hoveredSlot.time} - {getSlotStatus(hoveredSlot)}
+            {getTooltipText(hoveredSlot)}
           </div>
         )}
       </div>
@@ -131,6 +265,8 @@ export default function Dashboard({ view = 'individual' }) {
   const [user, setUser] = useState({ username: 'Loading...' });
   const [timeFilter, setTimeFilter] = useState('This Week');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
   const timeFilterOptions = ['Today', 'This Week', 'This Month'];
@@ -170,7 +306,7 @@ export default function Dashboard({ view = 'individual' }) {
     }
   };
 
-  // Load user from session and fetch from Auth0
+  // Load user from session and optionally fetch from Auth0 (non-blocking)
   useEffect(() => {
     let isMounted = true;
 
@@ -189,45 +325,46 @@ export default function Dashboard({ view = 'individual' }) {
           setUser(storedUser);
         }
 
-        // Get management API token
-        const token = await getManagementAccessToken();
-        
-        if (!token) {
-          console.error("Failed to get management token");
-          return;
-        }
+        // Try to fetch updated user data from Auth0 (optional - don't block if it fails)
+        try {
+          const token = await getManagementAccessToken();
+          
+          if (token) {
+            const response = await fetch(`${config.audience}users`, {
+              headers: { 
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+            });
 
-        // Fetch all users and find current user
-        const response = await fetch(`${config.audience}users`, {
-          headers: { 
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-        });
+            if (!isMounted) return;
 
-        if (!isMounted) return;
+            if (response.ok) {
+              const allUsers = await response.json();
+              const auth0User = allUsers.find((u) => u.email === storedUser.email);
 
-        if (response.ok) {
-          const allUsers = await response.json();
-          const auth0User = allUsers.find((u) => u.email === storedUser.email);
+              if (auth0User) {
+                const userData = {
+                  username: auth0User.user_metadata?.username || 
+                            auth0User.username || 
+                            auth0User.email.split("@")[0],
+                  email: auth0User.email,
+                  role: auth0User.app_metadata?.role || "User",
+                };
 
-          if (auth0User) {
-            const userData = {
-              username: auth0User.user_metadata?.username || 
-                        auth0User.username || 
-                        auth0User.email.split("@")[0],
-              email: auth0User.email,
-              role: auth0User.app_metadata?.role || "User",
-            };
-
-            if (isMounted) {
-              setUser(userData);
-              sessionStorage.setItem("user", JSON.stringify(userData));
+                if (isMounted) {
+                  setUser(userData);
+                  sessionStorage.setItem("user", JSON.stringify(userData));
+                }
+              }
             }
           }
+        } catch (auth0Error) {
+          // Auth0 fetch failed - that's OK, we already have user from sessionStorage
+          console.warn("Could not fetch updated user from Auth0, using cached data:", auth0Error);
         }
       } catch (error) {
-        console.error("Error fetching user data:", error);
+        console.error("Error loading user data:", error);
       }
     };
 
@@ -238,54 +375,81 @@ export default function Dashboard({ view = 'individual' }) {
     };
   }, []);
 
-  // Sample booking data with time slots
-  const bookings = [
-    {
-      id: 1,
-      name: '1B Co-Working Space',
-      location: 'CUHK InnoPort',
-      date: 'Thu, 6 Mar 2025',
-      time: '9:00 AM - 11 AM',
-      image: 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop',
-      availableSlots: [
-        { start: 9 * 60, end: 11 * 60 }, // 9:00 - 11:00
-        { start: 18 * 60, end: 20.5 * 60 }, // 18:00 - 20:30
-      ],
-      bookedSlots: [
-        { start: 14 * 60, end: 16.5 * 60 }, // 14:00 - 16:30
-      ]
-    },
-    {
-      id: 2,
-      name: '2B Event Hall',
-      location: 'CUHK InnoPort',
-      date: 'Thu, 6 Mar 2025',
-      time: '9:00 AM - 11 AM',
-      image: 'https://images.unsplash.com/photo-1497366811353-6870744d04b2?w=400&h=300&fit=crop',
-      availableSlots: [
-        { start: 9 * 60, end: 10.5 * 60 }, // 9:00 - 10:30
-        { start: 18 * 60, end: 21 * 60 }, // 18:00 - 21:00
-      ],
-      bookedSlots: [
-        { start: 14 * 60, end: 17 * 60 }, // 14:00 - 17:00
-      ]
-    },
-    {
-      id: 3,
-      name: '2B Event Hall',
-      location: 'CUHK InnoPort',
-      date: 'Thu, 6 Mar 2025',
-      time: '9:00 AM - 11 AM',
-      image: 'https://images.unsplash.com/photo-1497366754035-f200968a6e72?w=400&h=300&fit=crop',
-      availableSlots: [
-        { start: 10 * 60, end: 11.5 * 60 }, // 10:00 - 11:30
-        { start: 18.5 * 60, end: 21.5 * 60 }, // 18:30 - 21:30
-      ],
-      bookedSlots: [
-        { start: 14 * 60, end: 16 * 60 }, // 14:00 - 16:00
-      ]
-    }
-  ];
+  // Fetch bookings for current user
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchBookings = async () => {
+      try {
+        const storedUser = JSON.parse(sessionStorage.getItem("user"));
+        
+        if (!storedUser || !storedUser.email) {
+          console.error("No user email found in sessionStorage");
+          setLoading(false);
+          return;
+        }
+
+        console.log("Fetching bookings for user:", storedUser.email);
+
+        // Fetch ALL bookings and filter client-side (API doesn't support customer_id filter)
+        const allBookings = await viewAllBookings();
+        console.log("All bookings from API:", allBookings);
+        
+        const apiBookings = allBookings.filter(booking => 
+          booking.metadata?.customer_id === storedUser.email
+        );
+        console.log(`Filtered bookings for ${storedUser.email}:`, apiBookings);
+        
+        if (!isMounted) return;
+
+        // Map API bookings to UI format
+        const now = new Date();
+        console.log("Current time:", now);
+        
+        const futureBookings = apiBookings.filter(b => {
+          const startDate = new Date(b.starts_at);
+          const isCanceled = b.is_canceled;
+          const isFuture = startDate > now;
+          console.log(`Booking ${b.id}: starts_at=${b.starts_at}, startDate=${startDate}, isCanceled=${isCanceled}, isFuture=${isFuture}`);
+          return !isCanceled && isFuture;
+        });
+        console.log("Future bookings:", futureBookings);
+        
+        const mappedBookings = futureBookings
+          .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at)) // Sort by start time
+          .slice(0, 5) // Take first 5
+          .map(booking => {
+            // Timezone from location (API confirmed it's there)
+            const timezone = booking.location?.time_zone || 'Asia/Hong_Kong';
+            
+            return {
+              id: booking.id,
+              name: booking.resource?.name || 'Unknown Resource',
+              location: booking.location?.name || 'Unknown Location',
+              date: formatDate(booking.starts_at, timezone, 'EEE, d MMM yyyy'),
+              time: `${formatTime(booking.starts_at, timezone, 'h:mm a')} - ${formatTime(booking.ends_at, timezone, 'h:mm a')}`,
+              image: booking.resource?.metadata?.photo_url || 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop',
+              rawStartsAt: booking.starts_at // Keep raw ISO string for slot-bar calculation
+            };
+          });
+
+        setBookings(mappedBookings);
+        setLoading(false);
+      } catch (error) {
+        console.error("Error fetching bookings:", error);
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchBookings();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
 
   return (
     <div className="p-8 bg-gray-50">
@@ -344,15 +508,26 @@ export default function Dashboard({ view = 'individual' }) {
           <div className="h-px bg-gray-200 mb-6"></div>
 
           {/* Booking Cards Grid */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {bookings.map((booking) => (
-              <BookingCard 
-                key={booking.id} 
-                booking={booking}
-                onClick={() => navigate(`/booking/${booking.id}`, { state: { booking } })}
-              />
-            ))}
-          </div>
+          {loading ? (
+            <div className="text-center py-8 text-gray-500" style={{ fontFamily: 'Inter' }}>
+              Loading bookings...
+            </div>
+          ) : bookings.length === 0 ? (
+            <div className="text-center py-8 text-gray-500" style={{ fontFamily: 'Inter' }}>
+              No upcoming bookings found.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {bookings.map((booking) => (
+                <BookingCard 
+                  key={booking.id} 
+                  booking={booking}
+                  currentUserEmail={user.email}
+                  onClick={() => navigate(`/booking/${booking.id}`)}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Current Plan Section */}

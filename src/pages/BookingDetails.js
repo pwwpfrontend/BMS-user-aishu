@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { ChevronLeft, ChevronDown, ChevronUp, Users, Clock } from 'lucide-react';
+import { viewBooking, updateBooking, deleteBooking } from '../utils/bookingApi';
+import { formatDate, formatTime } from '../utils/time';
 
 // Custom Time Picker Component
 const TimePicker = ({ value, onChange, label }) => {
@@ -104,9 +106,11 @@ const TimePicker = ({ value, onChange, label }) => {
 
 export default function BookingDetails() {
   const navigate = useNavigate();
-  const location = useLocation();
-  const { booking } = location.state || {};
-
+  const { id } = useParams();
+  
+  const [booking, setBooking] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [selectedDate, setSelectedDate] = useState('26/10/2025');
   const [startTime, setStartTime] = useState('22:00');
   const [endTime, setEndTime] = useState('23:00');
@@ -114,6 +118,55 @@ export default function BookingDetails() {
   const [isBookingTimeExpanded, setIsBookingTimeExpanded] = useState(false);
 
   const durationOptions = ['1hour', '2 hours', '4 hours', '8 hours'];
+
+  // Fetch booking data
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchBookingData = async () => {
+      if (!id) {
+        setError('No booking ID provided');
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const bookingData = await viewBooking(id);
+        
+        if (!isMounted) return;
+
+        setBooking(bookingData);
+        
+        // Set initial form values from booking
+        // API confirmed location has time_zone at root level
+        const timezone = bookingData.location?.time_zone || 'Asia/Hong_Kong';
+        const startsAt = new Date(bookingData.starts_at);
+        const endsAt = new Date(bookingData.ends_at);
+        
+        // Format date for input (DD/MM/YYYY)
+        const dateStr = formatDate(bookingData.starts_at, timezone, 'dd/MM/yyyy');
+        setSelectedDate(dateStr);
+        
+        // Format times for input (HH:mm)
+        setStartTime(formatTime(bookingData.starts_at, timezone, 'HH:mm'));
+        setEndTime(formatTime(bookingData.ends_at, timezone, 'HH:mm'));
+        
+        setLoading(false);
+      } catch (error) {
+        console.error('Error fetching booking:', error);
+        if (isMounted) {
+          setError(error.message || 'Failed to load booking');
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchBookingData();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [id]);
 
   // Calculate end time based on start time and duration
   const calculateEndTime = (start, durationStr) => {
@@ -139,16 +192,34 @@ export default function BookingDetails() {
     setEndTime(calculateEndTime(startTime, newDuration));
   };
 
-  if (!booking) {
+  if (loading) {
     return (
       <div className="p-8">
-        <button onClick={() => navigate('/dashboard')} className="text-gray-600 hover:text-gray-900">
+        <button onClick={() => navigate('/dashboard')} className="text-gray-600 hover:text-gray-900 mb-4">
           ← Back to Dashboard
         </button>
-        <p className="mt-4">No booking data available</p>
+        <p className="text-gray-500">Loading booking details...</p>
       </div>
     );
   }
+
+  if (error || !booking) {
+    return (
+      <div className="p-8">
+        <button onClick={() => navigate('/dashboard')} className="text-gray-600 hover:text-gray-900 mb-4">
+          ← Back to Dashboard
+        </button>
+        <p className="text-red-600 mt-4">{error || 'Booking not found'}</p>
+      </div>
+    );
+  }
+
+  const timezone = booking.location?.time_zone || 'Asia/Hong_Kong';
+  const resourceImage = booking.resource?.metadata?.photo_url || 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop';
+  const resourceName = booking.resource?.name || 'Unknown Resource';
+  const capacity = booking.resource?.metadata?.capacity || booking.resource?.max_simultaneous_bookings || 1;
+  const category = booking.resource?.metadata?.category || 'Resource';
+  const isPast = new Date(booking.starts_at) < new Date();
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -170,30 +241,36 @@ export default function BookingDetails() {
             <div className="bg-white rounded-xl border border-gray-200 overflow-hidden mb-6">
               <div className="flex items-start gap-4 p-6">
                 <img
-                  src={booking.image}
-                  alt={booking.name}
+                  src={resourceImage}
+                  alt={resourceName}
                   className="w-64 h-48 object-cover rounded-lg"
                 />
                 <div className="flex-1">
                   <h1 className="text-2xl font-semibold text-gray-900 mb-2" style={{ fontFamily: 'Inter' }}>
-                    {booking.name}
+                    {resourceName}
                   </h1>
                   <div className="flex items-center gap-4 mb-3">
                     <div className="flex items-center gap-1 text-sm text-gray-600">
                       <Users className="w-4 h-4" />
-                      <span style={{ fontFamily: 'Inter' }}>x8</span>
+                      <span style={{ fontFamily: 'Inter' }}>x{capacity}</span>
                     </div>
-                    <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>
-                      Free of Charge
-                    </span>
-                    <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>
-                      Meeting Room
-                    </span>
+                    {booking.service?.name && (
+                      <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>
+                        {booking.service.name}
+                      </span>
+                    )}
+                    {category && (
+                      <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>
+                        {category}
+                      </span>
+                    )}
                   </div>
             
-                  <div className="flex items-center gap-2 text-sm text-gray-600" style={{ fontFamily: 'Inter' }}>
-                    <span>☑️ Air conditioning, Internet, Printer</span>
-                  </div>
+                  {booking.resource?.metadata?.resource_details?.description && (
+                    <div className="flex items-center gap-2 text-sm text-gray-600" style={{ fontFamily: 'Inter' }}>
+                      <span>☑️ {booking.resource.metadata.resource_details.description}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -295,21 +372,33 @@ export default function BookingDetails() {
                 <div className="flex items-start justify-between mb-2">
                   <div>
                     <p className="text-sm font-medium text-gray-900" style={{ fontFamily: 'Inter' }}>
-                      {booking.name}
+                      {resourceName}
                     </p>
                     <p className="text-xs text-gray-500" style={{ fontFamily: 'Inter' }}>
-                      Sunday, 26/10/2025 at {startTime} → {endTime}
+                      {formatDate(booking.starts_at, timezone, 'EEEE, dd/MM/yyyy')} at {startTime} → {endTime}
                     </p>
                   </div>
                 </div>
+                {booking.metadata?.customer_name && (
+                  <p className="text-xs text-gray-500 mb-2" style={{ fontFamily: 'Inter' }}>
+                    Booked by: {booking.metadata.customer_name}
+                  </p>
+                )}
+                {booking.is_canceled && (
+                  <span className="inline-block px-2 py-1 bg-red-100 text-red-700 text-xs rounded" style={{ fontFamily: 'Inter' }}>
+                    Canceled
+                  </span>
+                )}
               </div>
 
-              {/* Error Message */}
-              <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4">
-                <p className="text-sm text-red-600" style={{ fontFamily: 'Inter' }}>
-                  You can't edit a booking in the past.
-                </p>
-              </div>
+              {/* Error Message - only show if booking is in the past */}
+              {isPast && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4">
+                  <p className="text-sm text-red-600" style={{ fontFamily: 'Inter' }}>
+                    You can't edit a booking in the past.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
