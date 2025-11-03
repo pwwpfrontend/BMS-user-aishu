@@ -7,20 +7,28 @@ import { formatDate, formatTime } from '../utils/time';
 // Booking Card Component with Interactive Time Slots
 const BookingCard = ({ booking, onClick, currentUserEmail }) => {
   const [hoveredSlot, setHoveredSlot] = useState(null);
-  const [slotData, setSlotData] = useState({ scheduleSlots: [], bookedSlots: [] });
+  const [slotData, setSlotData] = useState({ scheduleSlots: [], bookedSlots: [], slotInterval: 15 });
   const [loading, setLoading] = useState(true);
 
-  // Generate time slots from 08:00 to 23:00 (every 30 minutes)
-  const generateTimeSlots = () => {
+  // Generate time slots from 08:00 to 23:00 based on duration_step
+  const generateTimeSlots = (intervalMinutes = 15) => {
     const slots = [];
-    for (let hour = 8; hour < 23; hour++) {
-      slots.push({ time: `${hour.toString().padStart(2, '0')}:00`, hour, minute: 0 });
-      slots.push({ time: `${hour.toString().padStart(2, '0')}:30`, hour, minute: 30 });
+    const startHour = 8;
+    const endHour = 23;
+    
+    for (let totalMinutes = startHour * 60; totalMinutes < endHour * 60; totalMinutes += intervalMinutes) {
+      const hour = Math.floor(totalMinutes / 60);
+      const minute = totalMinutes % 60;
+      slots.push({ 
+        time: `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`, 
+        hour, 
+        minute 
+      });
     }
     return slots;
   };
 
-  const timeSlots = generateTimeSlots();
+  const timeSlots = generateTimeSlots(slotData.slotInterval);
 
   // Fetch schedule and bookings for this resource
   useEffect(() => {
@@ -120,8 +128,20 @@ const BookingCard = ({ booking, onClick, currentUserEmail }) => {
         console.log('[SlotBar] Final bookedSlots:', bookedSlots);
         console.log('[SlotBar] Final scheduleSlots:', scheduleSlots);
 
+        // Get slot interval from service duration_step (default 15 minutes)
+        let slotInterval = 15; // default
+        if (resourceBookings.length > 0 && resourceBookings[0].service?.duration_step) {
+          const durationStep = resourceBookings[0].service.duration_step;
+          // Parse PT15M to 15 minutes
+          const match = durationStep.match(/PT(\d+)M/);
+          if (match) {
+            slotInterval = parseInt(match[1]);
+          }
+        }
+        console.log('[SlotBar] Using slot interval (minutes):', slotInterval);
+
         if (isMounted) {
-          setSlotData({ scheduleSlots, bookedSlots });
+          setSlotData({ scheduleSlots, bookedSlots, slotInterval });
           setLoading(false);
         }
       } catch (error) {

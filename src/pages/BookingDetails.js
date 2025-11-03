@@ -135,21 +135,21 @@ export default function BookingDetails() {
         
         if (!isMounted) return;
 
+        console.log('Fetched booking data:', bookingData);
         setBooking(bookingData);
         
-        // Set initial form values from booking
-        // API confirmed location has time_zone at root level
-        const timezone = bookingData.location?.time_zone || 'Asia/Hong_Kong';
-        const startsAt = new Date(bookingData.starts_at);
-        const endsAt = new Date(bookingData.ends_at);
-        
-        // Format date for input (DD/MM/YYYY)
-        const dateStr = formatDate(bookingData.starts_at, timezone, 'dd/MM/yyyy');
-        setSelectedDate(dateStr);
-        
-        // Format times for input (HH:mm)
-        setStartTime(formatTime(bookingData.starts_at, timezone, 'HH:mm'));
-        setEndTime(formatTime(bookingData.ends_at, timezone, 'HH:mm'));
+        // Set initial form values from booking (with null checks)
+        if (bookingData && bookingData.starts_at) {
+          const timezone = bookingData.location?.time_zone || 'Asia/Hong_Kong';
+          
+          // Format date for input (DD/MM/YYYY)
+          const dateStr = formatDate(bookingData.starts_at, timezone, 'dd/MM/yyyy');
+          setSelectedDate(dateStr);
+          
+          // Format times for input (HH:mm)
+          setStartTime(formatTime(bookingData.starts_at, timezone, 'HH:mm'));
+          setEndTime(formatTime(bookingData.ends_at, timezone, 'HH:mm'));
+        }
         
         setLoading(false);
       } catch (error) {
