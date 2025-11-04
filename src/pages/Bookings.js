@@ -1,9 +1,173 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Calendar, Grid3x3, ChevronLeft, ChevronRight, ChevronDown, SlidersHorizontal } from 'lucide-react';
-import { DateTime } from 'luxon';
-import { viewAllResources, getResourceScheduleInfo, getResourceBookingsForDate } from '../utils/bookingApi';
-import { generateSlotGroups, getWeekdayName, formatDateToYYYYMMDD, dateStringToZonedDate, parseDurationToMinutes } from '../utils/time';
+import { DateTime, Duration } from 'luxon';
+
+// Inlined booking utilities (from src/utils/bookingApi)
+const BASE_URL = 'https://njs-01.optimuslab.space/booking_system';
+async function apiRequest(endpoint, options = {}) {
+  const url = `${BASE_URL}${endpoint}`;
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+      ...options,
+    });
+    if (!response.ok) {
+      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error(`API Error (${endpoint}):`, error);
+    throw error;
+  }
+}
+async function viewAllResources() {
+  const response = await apiRequest('/viewAllresources');
+  return response.data || [];
+}
+async function getResourceScheduleInfo(resourceName, weekday = null) {
+  const encodedName = encodeURIComponent(resourceName);
+  const url = weekday 
+    ? `/getResourceScheduleInfo/${encodedName}?weekday=${weekday.toLowerCase()}`
+    : `/getResourceScheduleInfo/${encodedName}`;
+  const response = await apiRequest(url);
+  return response;
+}
+async function viewFilteredBookings(filters = {}) {
+  const params = new URLSearchParams();
+  const validFilters = ['resource_id', 'location_id', 'service_id'];
+  Object.entries(filters).forEach(([key, value]) => {
+    if (validFilters.includes(key) && value !== undefined && value !== null && value !== '') {
+      params.append(key, value);
+    }
+  });
+  const queryString = params.toString();
+  const endpoint = queryString ? `/viewFilteredBookings?${queryString}` : '/viewFilteredBookings';
+  const response = await apiRequest(endpoint);
+  return response.data || [];
+}
+async function getResourceBookingsForDate(resourceId, date) {
+  const resourceBookings = await viewFilteredBookings({ resource_id: resourceId });
+  return resourceBookings.filter(booking => {
+    if (!booking.starts_at) return false;
+    const bookingDate = booking.starts_at.split('T')[0];
+    return bookingDate === date;
+  });
+}
+
+// Inlined time utilities (from src/utils/time)
+function isoToZonedDate(isoString, timezone = null) {
+  const dt = DateTime.fromISO(isoString);
+  return timezone ? dt.setZone(timezone) : dt;
+}
+function minutesFromMidnight(dateTime) {
+  return dateTime.hour * 60 + dateTime.minute;
+}
+function parseDurationToMinutes(isoDuration) {
+  try {
+    const duration = Duration.fromISO(isoDuration);
+    return duration.as('minutes');
+  } catch (error) {
+    console.error('Error parsing duration:', isoDuration, error);
+    return 15;
+  }
+}
+function splitBlockIntoSlots(startTimeStr, endTimeStr, stepMinutes, date) {
+  const slots = [];
+  const [startHour, startMin] = startTimeStr.split(':').map(Number);
+  const [endHour, endMin] = endTimeStr.split(':').map(Number);
+  let current = date.set({ hour: startHour, minute: startMin, second: 0, millisecond: 0 });
+  const end = date.set({ hour: endHour, minute: endMin, second: 0, millisecond: 0 });
+  while (current < end) {
+    const next = current.plus({ minutes: stepMinutes });
+    if (next > end) break;
+    slots.push({
+      startMin: minutesFromMidnight(current),
+      endMin: minutesFromMidnight(next),
+      isoStart: current.toISO(),
+      isoEnd: next.toISO(),
+      isBooked: false,
+      bookingId: null,
+      bookingMeta: null,
+      availableCount: 1,
+    });
+    current = next;
+  }
+  return slots;
+}
+function markBookedSlots(slots, bookings, maxSimultaneous = 1, timezone = 'UTC') {
+  const slotBookingCounts = new Map();
+  slots.forEach((slot, idx) => slotBookingCounts.set(idx, []));
+  bookings.forEach((booking) => {
+    const bookingStart = isoToZonedDate(booking.starts_at, timezone);
+    const bookingEnd = isoToZonedDate(booking.ends_at, timezone);
+    const bookingStartMin = minutesFromMidnight(bookingStart);
+    const bookingEndMin = minutesFromMidnight(bookingEnd);
+    slots.forEach((slot, idx) => {
+      const slotOverlaps = (slot.startMin < bookingEndMin && slot.endMin > bookingStartMin);
+      if (slotOverlaps) {
+        const bookingList = slotBookingCounts.get(idx);
+        bookingList.push({
+          bookingId: booking.id,
+          customerId: booking.customer_id,
+          customerName: booking.metadata?.customer_name,
+          starts_at: booking.starts_at,
+          ends_at: booking.ends_at,
+        });
+      }
+    });
+  });
+  return slots.map((slot, idx) => {
+    const bookingList = slotBookingCounts.get(idx);
+    const bookingCount = bookingList.length;
+    return {
+      ...slot,
+      isBooked: bookingCount >= maxSimultaneous,
+      availableCount: Math.max(0, maxSimultaneous - bookingCount),
+      bookingId: bookingCount > 0 ? bookingList[0].bookingId : null,
+      bookingMeta: bookingCount > 0 ? bookingList : null,
+    };
+  });
+}
+function generateSlotGroups(scheduleBlocks, bookings, date, stepMinutes = 15, maxSimultaneous = 1, timezone = 'UTC') {
+  const slotGroups = [];
+  const zonedDate = date.setZone(timezone);
+  scheduleBlocks.forEach((block) => {
+    const slots = splitBlockIntoSlots(
+      block.start_time,
+      block.end_time,
+      stepMinutes,
+      zonedDate
+    );
+    const slotsWithBookings = markBookedSlots(
+      slots,
+      bookings,
+      maxSimultaneous,
+      timezone
+    );
+    slotGroups.push({
+      blockStart: block.start_time.substring(0, 5),
+      blockEnd: block.end_time.substring(0, 5),
+      slots: slotsWithBookings,
+    });
+  });
+  return slotGroups;
+}
+function getWeekdayName(date, timezone = 'UTC') {
+  let dt;
+  if (typeof date === 'string') {
+    dt = isoToZonedDate(date, timezone);
+  } else {
+    dt = date.setZone(timezone);
+  }
+  return dt.weekdayLong.toLowerCase();
+}
+function formatDateToYYYYMMDD(dateTime) {
+  return dateTime.toFormat('yyyy-MM-dd');
+}
 
 // Resource Card Component for Grid View
 const ResourceCard = ({ resource, onBook, selectedDate }) => {

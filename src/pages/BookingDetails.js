@@ -1,8 +1,58 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ChevronLeft, ChevronDown, ChevronUp, Users, Clock } from 'lucide-react';
-import { viewBooking, updateBooking, deleteBooking } from '../utils/bookingApi';
-import { formatDate, formatTime } from '../utils/time';
+import { DateTime } from 'luxon';
+
+// Inlined booking/time utilities (from src/utils)
+const BASE_URL = 'https://njs-01.optimuslab.space/booking_system';
+async function apiRequest(endpoint, options = {}) {
+  const url = `${BASE_URL}${endpoint}`;
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+      ...options,
+    });
+    if (!response.ok) {
+      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error(`API Error (${endpoint}):`, error);
+    throw error;
+  }
+}
+async function viewBooking(bookingId) {
+  const response = await apiRequest(`/viewBooking/${bookingId}`);
+  return response.data;
+}
+async function updateBooking(bookingId, updates) {
+  const response = await apiRequest(`/updateBooking/${bookingId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(updates),
+  });
+  return response;
+}
+async function deleteBooking(bookingId) {
+  const response = await apiRequest(`/deleteBooking/${bookingId}`, {
+    method: 'DELETE',
+  });
+  return response;
+}
+function isoToZonedDate(isoString, timezone = null) {
+  const dt = DateTime.fromISO(isoString);
+  return timezone ? dt.setZone(timezone) : dt;
+}
+function formatTime(isoString, timezone = 'UTC', format = 'hh:mm a') {
+  const dt = isoToZonedDate(isoString, timezone);
+  return dt.toFormat(format);
+}
+function formatDate(isoString, timezone = 'UTC', format = 'EEE, d MMM yyyy') {
+  const dt = isoToZonedDate(isoString, timezone);
+  return dt.toFormat(format);
+}
 
 // Custom Time Picker Component
 const TimePicker = ({ value, onChange, label }) => {

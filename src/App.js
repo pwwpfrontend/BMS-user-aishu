@@ -89,15 +89,13 @@ function App() {
           
           {/* Dashboard Routes */}
           <Route path="dashboard" element={<Dashboard />} />
-          <Route path="/activity" element={<Activity />} />
-          <Route path="/booking/:id" element={<BookingDetails />} />
+          <Route path="booking/:id" element={<BookingDetails />} />
           <Route path="bookings" element={<Bookings />} />
           <Route path="dashboard/individual" element={<Dashboard view="individual" />} />
           <Route path="dashboard/team" element={<DashboardTeam />} />
           
           {/* Other Routes */}
           <Route path="activity" element={<Activity />} />
-          <Route path="bookings" element={<Bookings />} />
           <Route path="plans" element={<Plans />} />
           <Route path="profile" element={<MyProfile />} />
           <Route path="support" element={<Support />} />

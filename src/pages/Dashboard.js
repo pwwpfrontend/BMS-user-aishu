@@ -1,8 +1,53 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronDown, ExternalLink } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { viewAllBookings, getResourceScheduleInfo } from '../utils/bookingApi';
-import { formatDate, formatTime } from '../utils/time';
+import { DateTime } from 'luxon';
+
+// Inlined booking/time utilities (from src/utils)
+const BASE_URL = 'https://njs-01.optimuslab.space/booking_system';
+async function apiRequest(endpoint, options = {}) {
+  const url = `${BASE_URL}${endpoint}`;
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+      ...options,
+    });
+    if (!response.ok) {
+      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error(`API Error (${endpoint}):`, error);
+    throw error;
+  }
+}
+async function viewAllBookings() {
+  const response = await apiRequest('/viewAllBookings');
+  return response.data || [];
+}
+async function getResourceScheduleInfo(resourceName, weekday = null) {
+  const encodedName = encodeURIComponent(resourceName);
+  const url = weekday 
+    ? `/getResourceScheduleInfo/${encodedName}?weekday=${weekday.toLowerCase()}`
+    : `/getResourceScheduleInfo/${encodedName}`;
+  const response = await apiRequest(url);
+  return response;
+}
+function isoToZonedDate(isoString, timezone = null) {
+  const dt = DateTime.fromISO(isoString);
+  return timezone ? dt.setZone(timezone) : dt;
+}
+function formatTime(isoString, timezone = 'UTC', format = 'hh:mm a') {
+  const dt = isoToZonedDate(isoString, timezone);
+  return dt.toFormat(format);
+}
+function formatDate(isoString, timezone = 'UTC', format = 'EEE, d MMM yyyy') {
+  const dt = isoToZonedDate(isoString, timezone);
+  return dt.toFormat(format);
+}
 
 // Booking Card Component with Interactive Time Slots
 const BookingCard = ({ booking, onClick, currentUserEmail }) => {
