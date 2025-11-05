@@ -494,7 +494,8 @@ export default function Dashboard({ view = 'individual' }) {
               date: formatDate(booking.starts_at, timezone, 'EEE, d MMM yyyy'),
               time: `${formatTime(booking.starts_at, timezone, 'h:mm a')} - ${formatTime(booking.ends_at, timezone, 'h:mm a')}`,
               image: booking.resource?.metadata?.photo_url || 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop',
-              rawStartsAt: booking.starts_at // Keep raw ISO string for slot-bar calculation
+              rawStartsAt: booking.starts_at, // Keep raw ISO string for slot-bar calculation
+              raw: booking // Pass full booking for details page fallback
             };
           });
 
@@ -588,7 +589,7 @@ export default function Dashboard({ view = 'individual' }) {
                   key={booking.id} 
                   booking={booking}
                   currentUserEmail={user.email}
-                  onClick={() => navigate(`/booking/${booking.id}`)}
+                  onClick={() => navigate(`/booking/${booking.id}`, { state: { booking: booking.raw } })}
                 />
               ))}
             </div>

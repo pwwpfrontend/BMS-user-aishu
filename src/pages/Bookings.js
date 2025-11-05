@@ -26,7 +26,7 @@ async function apiRequest(endpoint, options = {}) {
 }
 async function viewAllResources() {
   const response = await apiRequest('/viewAllresources');
-  return response.data || [];
+  return response || [];
 }
 async function getResourceScheduleInfo(resourceName, weekday = null) {
   const encodedName = encodeURIComponent(resourceName);
@@ -47,7 +47,7 @@ async function viewFilteredBookings(filters = {}) {
   const queryString = params.toString();
   const endpoint = queryString ? `/viewFilteredBookings?${queryString}` : '/viewFilteredBookings';
   const response = await apiRequest(endpoint);
-  return response.data || [];
+  return response || [];
 }
 async function getResourceBookingsForDate(resourceId, date) {
   const resourceBookings = await viewFilteredBookings({ resource_id: resourceId });
@@ -174,6 +174,7 @@ const ResourceCard = ({ resource, onBook, selectedDate }) => {
   const [hoveredSlot, setHoveredSlot] = useState(null);
   const [slotGroups, setSlotGroups] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [featuresText, setFeaturesText] = useState('');
 
   // Flatten all slots from all groups for rendering
   const allSlots = slotGroups.flatMap(group => group.slots);
@@ -189,6 +190,34 @@ const ResourceCard = ({ resource, onBook, selectedDate }) => {
   };
 
   const displaySlots = generateDisplayTimeSlots();
+
+  // Fetch resource features by mongo id if available
+  useEffect(() => {
+    let isMounted = true;
+    const fetchFeatures = async () => {
+      const mongoId = resource?.mongoId;
+      if (!mongoId) return;
+      try {
+        const resp = await fetch(`${BASE_URL}/resource/${mongoId}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const groups = ['features', 'amenities', 'security'];
+        const enabled = [];
+        groups.forEach(g => {
+          const obj = data[g] || {};
+          Object.entries(obj).forEach(([k, v]) => {
+            if (v && v.enabled) {
+              const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+              enabled.push(label);
+            }
+          });
+        });
+        if (isMounted && enabled.length > 0) setFeaturesText(enabled.join(' • '));
+      } catch (_) {}
+    };
+    fetchFeatures();
+    return () => { isMounted = false; };
+  }, [resource?.mongoId]);
 
   // Load schedule and bookings when resource or date changes
   useEffect(() => {
@@ -309,11 +338,19 @@ const ResourceCard = ({ resource, onBook, selectedDate }) => {
             </p>
           )}
           
-          {/* Amenities */}
-          <div className="text-sm text-gray-600 mb-4 flex items-start gap-2" style={{ fontFamily: 'Inter' }}>
+          {/* Description */}
+          <div className="text-sm text-gray-600 mb-2 flex items-start gap-2" style={{ fontFamily: 'Inter' }}>
             <span className="text-gray-400 flex-shrink-0">+</span>
             <span>{resource.amenities}</span>
           </div>
+
+          {/* Enabled Features (from backend) */}
+          {featuresText && (
+            <div className="text-sm text-gray-700 mb-4 flex items-start gap-2" style={{ fontFamily: 'Inter' }}>
+              <span className="text-gray-400 flex-shrink-0">✓</span>
+              <span>{featuresText}</span>
+            </div>
+          )}
 
           {/* Spacer to push button and timeline to bottom */}
           <div className="flex-1"></div>
@@ -461,6 +498,7 @@ export default function Bookings() {
             note: resource.metadata?.resource_details?.note || '',
             amenities: resource.metadata?.resource_details?.description || 'Standard amenities',
             image: resource.metadata?.photo_url || 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop',
+            mongoId: resource.mongo_id || resource.metadata?.mongo_id || null,
             // Pass through full resource data
             ...resource
           };
