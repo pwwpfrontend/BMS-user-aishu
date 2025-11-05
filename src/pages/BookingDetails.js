@@ -310,21 +310,44 @@ export default function BookingDetails() {
   useEffect(() => {
     let mounted = true;
     const load = async () => {
-      const mongoId = booking?.resource?.mongo_id || booking?.resource?.metadata?.mongo_id || booking?.resource?._id;
-      if (!mongoId) return;
+      if (!booking?.resource) return;
+      let mongoId = booking?.resource?.mongoId || booking?.resource?.mongo_id || booking?.resource?.metadata?.mongo_id || booking?.resource?._id;
       try {
+        // Fallback: look up by name if mongoId missing
+        if (!mongoId && booking?.resource?.name) {
+          const name = encodeURIComponent(booking.resource.name);
+          const res = await fetch(`${API_BASE_URL}/viewResource/${name}`);
+          if (res.ok) {
+            const json = await res.json();
+            const item = json?.data?.[0] || null;
+            mongoId = item?.mongo_id || item?.metadata?.mongo_id || mongoId;
+          }
+        }
+        if (!mongoId) return;
         const resp = await fetch(`${API_BASE_URL}/resource/${mongoId}`);
         if (!resp.ok) return;
         const data = await resp.json();
         const groups = ['features','amenities','security'];
         const enabled = [];
-        groups.forEach(g => { const obj=data[g]||{}; Object.entries(obj).forEach(([k,v])=>{ if(v&&v.enabled){ enabled.push(k.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase())); } }); });
+        groups.forEach(g => {
+          const obj = data[g] || {};
+          Object.entries(obj).forEach(([k, v]) => {
+            // Support {enabled:true}, true, or 'true'
+            const isEnabled = (v && typeof v === 'object' && (v.enabled === true || v.enabled === 'true')) || v === true || v === 'true';
+            if (isEnabled) {
+              const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+              enabled.push(label);
+            }
+          });
+        });
         if (mounted && enabled.length>0) setFeaturesText(enabled.join(' • '));
-      } catch {}
+      } catch (e) {
+        // ignore
+      }
     };
     load();
     return ()=>{ mounted=false; };
-  }, [booking?.resource]);
+  }, [booking?.resource?.name]);
 
   // Load service and schedule for resource
   useEffect(() => {
@@ -498,10 +521,14 @@ export default function BookingDetails() {
   const isPastBooking = bookingStartHK < new Date();
 
   const convertTo12Hour = (time24) => {
-    const [h, m] = time24.split(':').map(Number);
+    if (!time24 || typeof time24 !== 'string' || !time24.includes(':')) return '--:--';
+    const [hStr, mStr] = time24.split(':');
+    const h = parseInt(hStr, 10);
+    const m = parseInt(mStr, 10);
+    if (Number.isNaN(h) || Number.isNaN(m)) return '--:--';
     const period = h >= 12 ? 'PM' : 'AM';
     const h12 = h % 12 === 0 ? 12 : h % 12;
-    return `${h12.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')} ${period}`;
+    return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${period}`;
   };
 
   return (
@@ -634,6 +661,12 @@ export default function BookingDetails() {
                 )}
                 {booking?.is_canceled && (
                   <span className="inline-block px-2 py-1 bg-red-100 text-red-700 text-xs rounded" style={{ fontFamily: 'Inter' }}>Canceled</span>
+                )}
+                {featuresText && (
+                  <div className="mt-3 flex items-start gap-2 text-xs text-gray-700" style={{ fontFamily: 'Inter' }}>
+                    <span className="text-gray-400 flex-shrink-0">✓</span>
+                    <span>{featuresText}</span>
+                  </div>
                 )}
               </div>
 

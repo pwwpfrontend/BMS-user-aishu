@@ -330,7 +330,8 @@ export default function Dashboard({ view = 'individual' }) {
   const [user, setUser] = useState({ username: 'Loading...' });
   const [timeFilter, setTimeFilter] = useState('This Week');
   const [isFilterOpen, setIsFilterOpen] = useState(false);
-  const [bookings, setBookings] = useState([]);
+  const [bookings, setBookings] = useState([]); // mapped for display
+  const [allUserBookings, setAllUserBookings] = useState([]); // raw API objects for current user
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -440,81 +441,70 @@ export default function Dashboard({ view = 'individual' }) {
     };
   }, []);
 
-  // Fetch bookings for current user
+  // Fetch bookings for current user (all, not just upcoming)
   useEffect(() => {
     let isMounted = true;
 
     const fetchBookings = async () => {
       try {
         const storedUser = JSON.parse(sessionStorage.getItem("user"));
-        
         if (!storedUser || !storedUser.email) {
           console.error("No user email found in sessionStorage");
           setLoading(false);
           return;
         }
 
-        console.log("Fetching bookings for user:", storedUser.email);
-
-        // Fetch ALL bookings and filter client-side (API doesn't support customer_id filter)
-        const allBookings = await viewAllBookings();
-        console.log("All bookings from API:", allBookings);
-        
-        const apiBookings = allBookings.filter(booking => 
-          booking.metadata?.customer_id === storedUser.email
-        );
-        console.log(`Filtered bookings for ${storedUser.email}:`, apiBookings);
-        
+        const all = await viewAllBookings();
+        const mine = (all || []).filter(b => b.metadata?.customer_id === storedUser.email && !b.is_canceled);
         if (!isMounted) return;
-
-        // Map API bookings to UI format
-        const now = new Date();
-        console.log("Current time:", now);
-        
-        const futureBookings = apiBookings.filter(b => {
-          const startDate = new Date(b.starts_at);
-          const isCanceled = b.is_canceled;
-          const isFuture = startDate > now;
-          console.log(`Booking ${b.id}: starts_at=${b.starts_at}, startDate=${startDate}, isCanceled=${isCanceled}, isFuture=${isFuture}`);
-          return !isCanceled && isFuture;
-        });
-        console.log("Future bookings:", futureBookings);
-        
-        const mappedBookings = futureBookings
-          .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at)) // Sort by start time
-          .slice(0, 5) // Take first 5
-          .map(booking => {
-            // Timezone from location (API confirmed it's there)
-            const timezone = booking.location?.time_zone || 'Asia/Hong_Kong';
-            
-            return {
-              id: booking.id,
-              name: booking.resource?.name || 'Unknown Resource',
-              location: booking.location?.name || 'Unknown Location',
-              date: formatDate(booking.starts_at, timezone, 'EEE, d MMM yyyy'),
-              time: `${formatTime(booking.starts_at, timezone, 'h:mm a')} - ${formatTime(booking.ends_at, timezone, 'h:mm a')}`,
-              image: booking.resource?.metadata?.photo_url || 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop',
-              rawStartsAt: booking.starts_at, // Keep raw ISO string for slot-bar calculation
-              raw: booking // Pass full booking for details page fallback
-            };
-          });
-
-        setBookings(mappedBookings);
+        setAllUserBookings(mine);
         setLoading(false);
       } catch (error) {
         console.error("Error fetching bookings:", error);
-        if (isMounted) {
-          setLoading(false);
-        }
+        if (isMounted) setLoading(false);
       }
     };
 
     fetchBookings();
-
-    return () => {
-      isMounted = false;
-    };
+    return () => { isMounted = false; };
   }, []);
+
+  // Apply time filter and map for display whenever data or filter changes
+  useEffect(() => {
+    const filtered = (allUserBookings || []).filter(b => {
+      const tz = b.location?.time_zone || 'Asia/Hong_Kong';
+      const start = DateTime.fromISO(b.starts_at).setZone(tz);
+      const now = DateTime.now().setZone(tz);
+      if (timeFilter === 'Today') {
+        return start.hasSame(now, 'day');
+      } else if (timeFilter === 'This Week') {
+        const startOfWeek = now.startOf('week');
+        const endOfWeek = now.endOf('week');
+        return start >= startOfWeek && start <= endOfWeek;
+      } else if (timeFilter === 'This Month') {
+        return start.hasSame(now, 'month');
+      }
+      return true;
+    });
+
+    const mapped = filtered
+      .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))
+      .map(booking => {
+        const timezone = booking.location?.time_zone || 'Asia/Hong_Kong';
+        return {
+          id: booking.id,
+          name: booking.resource?.name || 'Unknown Resource',
+          location: booking.location?.name || 'Unknown Location',
+          date: formatDate(booking.starts_at, timezone, 'EEE, d MMM yyyy'),
+          time: `${formatTime(booking.starts_at, timezone, 'h:mm a')} - ${formatTime(booking.ends_at, timezone, 'h:mm a')}`,
+          image: booking.resource?.metadata?.photo_url || 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop',
+          rawStartsAt: booking.starts_at,
+          raw: booking,
+        };
+      });
+
+    setBookings(mapped);
+  }, [allUserBookings, timeFilter]);
 
 
   return (
@@ -534,7 +524,7 @@ export default function Dashboard({ view = 'individual' }) {
         <div className="mb-10">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-2xl font-semibold text-gray-900" style={{ fontFamily: 'Inter' }}>
-              Recent Bookings
+              My Bookings
             </h2>
             
             {/* Time Filter Dropdown */}
@@ -580,7 +570,7 @@ export default function Dashboard({ view = 'individual' }) {
             </div>
           ) : bookings.length === 0 ? (
             <div className="text-center py-8 text-gray-500" style={{ fontFamily: 'Inter' }}>
-              No upcoming bookings found.
+              No bookings for this filter.
             </div>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
