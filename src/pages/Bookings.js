@@ -18,7 +18,21 @@ async function apiRequest(endpoint, options = {}) {
     if (!response.ok) {
       throw new Error(`API request failed: ${response.status} ${response.statusText}`);
     }
-    return await response.json();
+    
+    // Get response as text first to handle parsing errors
+    const responseText = await response.text();
+    
+    // Try to parse as JSON
+    try {
+      return JSON.parse(responseText);
+    } catch (parseError) {
+      // If it's not JSON, return the text if it's a simple string response
+      // (like service ID which might be returned as plain text)
+      if (responseText && responseText.trim()) {
+        return responseText.trim();
+      }
+      throw new Error(`Failed to parse response as JSON: ${parseError.message}`);
+    }
   } catch (error) {
     console.error(`API Error (${endpoint}):`, error);
     throw error;
@@ -47,14 +61,22 @@ async function viewFilteredBookings(filters = {}) {
   const queryString = params.toString();
   const endpoint = queryString ? `/viewFilteredBookings?${queryString}` : '/viewFilteredBookings';
   const response = await apiRequest(endpoint);
-  return response || [];
+  // API returns {data: [], meta: {}, links: {}}
+  return Array.isArray(response?.data) ? response.data : (Array.isArray(response) ? response : []);
 }
-async function getResourceBookingsForDate(resourceId, date) {
-  const resourceBookings = await viewFilteredBookings({ resource_id: resourceId });
-  return resourceBookings.filter(booking => {
-    if (!booking.starts_at) return false;
-    const bookingDate = booking.starts_at.split('T')[0];
-    return bookingDate === date;
+async function viewAllBookings() {
+  const resp = await apiRequest('/viewAllBookings');
+  // API returns {data: [], meta: {}, links: {}}
+  return Array.isArray(resp?.data) ? resp.data : (Array.isArray(resp) ? resp : []);
+}
+async function getResourceBookingsForDate(resourceObj, date) {
+  const all = await viewAllBookings();
+  return all.filter(b => {
+    const sameResource = (b.resource?.id && resourceObj.id && b.resource.id === resourceObj.id) || (b.resource?.name && b.resource.name === resourceObj.name);
+    if (!sameResource) return false;
+    if (!b?.starts_at) return false;
+    const bookingDate = b.starts_at.split('T')[0];
+    return bookingDate === date && !b.is_canceled;
   });
 }
 
@@ -170,26 +192,31 @@ function formatDateToYYYYMMDD(dateTime) {
 }
 
 // Resource Card Component for Grid View
-const ResourceCard = ({ resource, onBook, selectedDate }) => {
+const ResourceCard = ({ resource, onBook, selectedDate, selectedStartTime, selectedEndTime }) => {
   const [hoveredSlot, setHoveredSlot] = useState(null);
-  const [slotGroups, setSlotGroups] = useState([]);
+  const [slotData, setSlotData] = useState({ scheduleSlots: [], bookedSlots: [], slotInterval: 15 });
   const [loading, setLoading] = useState(false);
   const [featuresText, setFeaturesText] = useState('');
 
-  // Flatten all slots from all groups for rendering
-  const allSlots = slotGroups.flatMap(group => group.slots);
-
-  // Generate display time slots (for UI visualization)
-  const generateDisplayTimeSlots = () => {
+  // Generate time slots from 08:00 to 23:00 based on duration_step (same as dashboard)
+  const generateTimeSlots = (intervalMinutes = 15) => {
     const slots = [];
-    for (let hour = 8; hour < 23; hour++) {
-      slots.push({ time: `${hour.toString().padStart(2, '0')}:00`, hour, minute: 0 });
-      slots.push({ time: `${hour.toString().padStart(2, '0')}:30`, hour, minute: 30 });
+    const startHour = 8;
+    const endHour = 23;
+    
+    for (let totalMinutes = startHour * 60; totalMinutes < endHour * 60; totalMinutes += intervalMinutes) {
+      const hour = Math.floor(totalMinutes / 60);
+      const minute = totalMinutes % 60;
+      slots.push({ 
+        time: `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`, 
+        hour, 
+        minute 
+      });
     }
     return slots;
   };
 
-  const displaySlots = generateDisplayTimeSlots();
+  const timeSlots = generateTimeSlots(slotData.slotInterval);
 
   // Fetch resource features by mongo id if available
   useEffect(() => {
@@ -219,81 +246,184 @@ const ResourceCard = ({ resource, onBook, selectedDate }) => {
     return () => { isMounted = false; };
   }, [resource?.mongoId]);
 
-  // Load schedule and bookings when resource or date changes
+  // Load schedule and bookings when resource or date changes (same logic as dashboard)
   useEffect(() => {
     let isMounted = true;
 
-    const loadSlots = async () => {
+    const fetchSlotData = async () => {
       if (!resource || !selectedDate) return;
 
       setLoading(true);
       try {
-        // Get timezone - from resource's associated location if available, otherwise UTC
-        const timezone = 'Asia/Hong_Kong'; // Default timezone based on API response
-        
-        // Parse selected date
-        const dateObj = DateTime.fromFormat(selectedDate, 'dd/MM/yyyy', { zone: timezone });
-        const weekday = getWeekdayName(dateObj, timezone);
-        const dateStr = formatDateToYYYYMMDD(dateObj);
+        // Get resource name and selected date
+        const resourceName = resource.name;
+        const bookingDate = new Date(selectedDate);
+        const weekday = bookingDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
 
-        // Fetch schedule blocks for this resource (returns all weekdays)
-        const scheduleResponse = await getResourceScheduleInfo(resource.name);
-        const allScheduleBlocks = scheduleResponse?.schedule_blocks || [];
+        // Fetch schedule blocks for this resource (same as dashboard)
+        const scheduleResponse = await getResourceScheduleInfo(resourceName);
+        const allScheduleBlocks = Array.isArray(scheduleResponse) 
+          ? scheduleResponse 
+          : (scheduleResponse?.schedule_blocks || scheduleResponse?.data || []);
         
-        // Filter schedule blocks for the selected weekday
-        const scheduleBlocks = allScheduleBlocks.filter(block => 
-          block.weekday.toLowerCase() === weekday.toLowerCase()
+        // Filter for the selected weekday
+        const todaySchedule = allScheduleBlocks.filter(block => 
+          (block.weekday || '').toLowerCase() === weekday
         );
 
-        // Fetch bookings for this resource on this date
-        const bookings = await getResourceBookingsForDate(resource.id, dateStr);
+        // Convert schedule blocks to minute ranges (same as dashboard)
+        const scheduleSlots = [];
+        todaySchedule.forEach(block => {
+          const [startHour, startMin] = block.start_time.split(':').map(Number);
+          const [endHour, endMin] = block.end_time.split(':').map(Number);
+          const startMinutes = startHour * 60 + startMin;
+          const endMinutes = endHour * 60 + endMin;
+          scheduleSlots.push({ start: startMinutes, end: endMinutes });
+        });
 
-        if (!isMounted) return;
+        // Fetch all bookings for this resource on this date
+        const allBookings = await viewAllBookings();
+        console.log(`[SlotBar] Resource: ${resourceName}, Target date: ${bookingDate.toDateString()}`);
+        console.log('[SlotBar] All bookings from API:', allBookings);
+        
+        const resourceBookings = allBookings.filter(b => {
+          const matchesResource = b.resource?.name === resourceName;
+          const bookingStart = new Date(b.starts_at);
+          const bookingStartDate = bookingStart.toDateString();
+          const targetDate = bookingDate.toDateString();
+          const matchesDate = bookingStartDate === targetDate;
+          
+          console.log(`[SlotBar] Checking booking ${b.id}:`, {
+            resourceName: b.resource?.name,
+            matchesResource,
+            bookingStartDate,
+            targetDate,
+            matchesDate,
+            starts_at: b.starts_at
+          });
+          
+          return matchesResource && matchesDate && !b.is_canceled;
+        });
+        console.log('[SlotBar] Filtered resourceBookings:', resourceBookings);
 
-        // Determine slot step from service
-        const stepMinutes = resource.service?.duration_step 
-          ? parseDurationToMinutes(resource.service.duration_step) 
-          : 15;
+        // Convert bookings to minute ranges with user info (same as dashboard)
+        const bookedSlots = resourceBookings.map(b => {
+          const startsAt = b.starts_at;
+          const endsAt = b.ends_at;
+          
+          // Extract just the time part (HH:MM:SS) from the ISO string
+          const startTimePart = startsAt.split('T')[1].split('+')[0].split('-')[0];
+          const endTimePart = endsAt.split('T')[1].split('+')[0].split('-')[0];
+          
+          const [startHour, startMin] = startTimePart.split(':').map(Number);
+          const [endHour, endMin] = endTimePart.split(':').map(Number);
+          
+          const startMinutes = startHour * 60 + startMin;
+          const endMinutes = endHour * 60 + endMin;
+          
+          return {
+            start: startMinutes,
+            end: endMinutes,
+            customerId: b.metadata?.customer_id,
+            customerName: b.metadata?.customer_name
+          };
+        });
 
-        // Generate slot groups
-        const groups = generateSlotGroups(
-          scheduleBlocks,
-          bookings,
-          dateObj,
-          stepMinutes,
-          resource.max_simultaneous_bookings || 1,
-          timezone
-        );
+        // Get slot interval from service (via resource->service API chain)
+        let slotInterval = 15; // default
+        try {
+          // Get service ID for this resource
+          const serviceIdRes = await apiRequest('/getServiceIdbyResourceId', {
+            method: 'POST',
+            body: JSON.stringify({ resource_id: resource.id })
+          });
+          
+          if (typeof serviceIdRes === 'string' && serviceIdRes.trim()) {
+            // Get service details
+            const serviceRes = await apiRequest(`/getService/${serviceIdRes}`);
+            if (serviceRes) {
+              // Try different interval fields in service
+              const service = serviceRes;
+              if (service.bookable_interval) {
+                const match = service.bookable_interval.match(/PT(\d+)M/);
+                if (match) slotInterval = parseInt(match[1]);
+              } else if (service.duration_step) {
+                const match = service.duration_step.match(/PT(\d+)M/);
+                if (match) slotInterval = parseInt(match[1]);
+              }
+              console.log('[SlotBar] Service details:', service);
+            }
+          }
+        } catch (e) {
+          console.warn('[SlotBar] Could not fetch service interval, using default:', e);
+        }
+        console.log('[SlotBar] Using slot interval (minutes):', slotInterval);
+        console.log('[SlotBar] Final bookedSlots:', bookedSlots);
+        console.log('[SlotBar] Final scheduleSlots:', scheduleSlots);
 
-        setSlotGroups(groups);
+        if (isMounted) {
+          setSlotData({ scheduleSlots, bookedSlots, slotInterval });
+          setLoading(false);
+        }
       } catch (error) {
-        console.error('Error loading slots:', error);
-      } finally {
+        console.error('Error fetching slot data:', error);
         if (isMounted) setLoading(false);
       }
     };
 
-    loadSlots();
+    fetchSlotData();
 
     return () => {
       isMounted = false;
     };
-  }, [resource, selectedDate]);
+  }, [resource.name, selectedDate]);
 
-  // Get slot status based on real data
-  const getSlotStatus = (displaySlot) => {
-    const slotTime = displaySlot.hour * 60 + displaySlot.minute;
+  // Get slot status based on real data (exactly same logic as dashboard)
+  const getSlotStatus = (slot) => {
+    const slotTime = slot.hour * 60 + slot.minute;
     
-    // Find matching slot in allSlots
-    const matchingSlot = allSlots.find(s => 
-      s.startMin <= slotTime && s.endMin > slotTime
-    );
-
-    if (!matchingSlot) {
-      return 'unavailable';
+    // Check if slot is booked (red)
+    for (const bookedSlot of slotData.bookedSlots) {
+      if (slotTime >= bookedSlot.start && slotTime < bookedSlot.end) {
+        return { status: 'booked', booking: bookedSlot };
+      }
     }
+    
+    // Check if slot is in schedule (green)
+    for (const scheduleSlot of slotData.scheduleSlots) {
+      if (slotTime >= scheduleSlot.start && slotTime < scheduleSlot.end) {
+        return { status: 'available' };
+      }
+    }
+    
+    return { status: 'unavailable' };
+  };
 
-    return matchingSlot.isBooked ? 'booked' : 'available';
+  // Get tooltip text for hovered slot
+  const getTooltipText = (slot) => {
+    const slotStatus = getSlotStatus(slot);
+    if (slotStatus.status === 'booked') {
+      return 'Booked';
+    }
+    return `${slot.time} - ${slotStatus.status}`;
+  };
+
+  // Selection window mins for highlighting
+  const selStart = (() => {
+    if (!selectedStartTime || !selectedStartTime.includes(':')) return null;
+    const [h, m] = selectedStartTime.split(':').map(Number);
+    return h*60+m;
+  })();
+  const selEnd = (() => {
+    if (!selectedEndTime || !selectedEndTime.includes(':')) return null;
+    const [h, m] = selectedEndTime.split(':').map(Number);
+    return h*60+m;
+  })();
+
+  const isInSelection = (slot) => {
+    if (selStart == null || selEnd == null) return false;
+    const t = slot.hour*60+slot.minute;
+    return t >= selStart && t < selEnd;
   };
 
   return (
@@ -374,17 +504,19 @@ const ResourceCard = ({ resource, onBook, selectedDate }) => {
               </div>
             ) : (
               <div className="flex items-center gap-0.5 mb-2">
-                {displaySlots.map((slot, index) => {
-                  const status = getSlotStatus(slot);
+                {timeSlots.map((slot, index) => {
+                  const slotStatus = getSlotStatus(slot);
+                  const status = slotStatus.status;
+                  const highlight = isInSelection(slot);
                   return (
                     <div
                       key={index}
-                      className={`h-5 flex-1 transition-all ${
+                      className={`relative h-5 flex-1 rounded-sm cursor-pointer transition-all ${
                         status === 'available' 
-                          ? 'hover:opacity-80 cursor-pointer' 
+                          ? 'hover:opacity-80' 
                           : status === 'booked'
-                          ? 'cursor-not-allowed'
-                          : 'bg-gray-200 cursor-not-allowed'
+                          ? 'hover:opacity-80'
+                          : 'bg-gray-200 hover:bg-gray-300'
                       }`}
                       style={
                         status === 'available' 
@@ -395,7 +527,6 @@ const ResourceCard = ({ resource, onBook, selectedDate }) => {
                       }
                       onMouseEnter={() => setHoveredSlot(slot)}
                       onMouseLeave={() => setHoveredSlot(null)}
-                      title={`${slot.time} - ${status}`}
                     />
                   );
                 })}
@@ -417,7 +548,7 @@ const ResourceCard = ({ resource, onBook, selectedDate }) => {
             {/* Hover Tooltip */}
             {hoveredSlot && (
               <div className="absolute -top-10 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white text-xs px-3 py-1.5 rounded-md whitespace-nowrap z-10" style={{ fontFamily: 'Inter' }}>
-                {hoveredSlot.time} - {getSlotStatus(hoveredSlot)}
+                {getTooltipText(hoveredSlot)}
               </div>
             )}
           </div>
@@ -445,25 +576,36 @@ export default function Bookings() {
   const navigate = useNavigate();
   const [view, setView] = useState('grid'); // 'grid' or 'calendar'
   
-  // Set default date to today
+// Set default date to today
   const today = DateTime.now();
-  const [selectedDate, setSelectedDate] = useState(today.toFormat('dd/MM/yyyy'));
-  const [startTime, setStartTime] = useState('3:00 PM');
-  const [endTime, setEndTime] = useState('4:00 PM');
+  const [selectedDate, setSelectedDate] = useState(today.toFormat('yyyy-LL-dd'));
+  const [startTime, setStartTime] = useState('15:00');
+  const [endTime, setEndTime] = useState('16:00');
   const [resourceFilter, setResourceFilter] = useState('All Resources');
   const [isResourceFilterOpen, setIsResourceFilterOpen] = useState(false);
   const [isOtherFiltersOpen, setIsOtherFiltersOpen] = useState(false);
   
+  // Additional filters state
+  const [capacityFilter, setCapacityFilter] = useState('Any');
+  const [selectedFeatures, setSelectedFeatures] = useState([]);
+  
   // Resources state
   const [resources, setResources] = useState([]);
+  const [resourceOptions, setResourceOptions] = useState(['All Resources']);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   
+  // Availability checking state
+  const [resourceAvailability, setResourceAvailability] = useState({});
+  
   // Calendar state
   const [currentMonth, setCurrentMonth] = useState(today.toFormat('MMMM yyyy'));
-  const [calendarView, setCalendarView] = useState('Month'); // Month, Week, Day, 30 days
+  const [currentWeekStart, setCurrentWeekStart] = useState(today.startOf('week'));
+  const [currentViewDate, setCurrentViewDate] = useState(today);
+  const [calendarView, setCalendarView] = useState('Week'); // Month, Week, Day, 30 days
+  const [calendarBookings, setCalendarBookings] = useState([]);
 
-  const resourceOptions = ['All Resources', 'Meeting Rooms', 'Event Halls', 'Co-Working Spaces'];
+  // resourceOptions is populated dynamically from API categories
 
   // Fetch resources on mount
   useEffect(() => {
@@ -505,6 +647,9 @@ export default function Bookings() {
         });
 
         setResources(mappedResources);
+        // Build resource categories from API data
+        const categories = Array.from(new Set(mappedResources.map(r => r.type))).filter(Boolean).sort();
+        setResourceOptions(['All Resources', ...categories]);
         setLoading(false);
       } catch (error) {
         console.error('Error fetching resources:', error);
@@ -522,66 +667,245 @@ export default function Bookings() {
     };
   }, []);
 
+  // Check resource availability when date/time changes
+  useEffect(() => {
+    const checkAvailability = async () => {
+      if (!selectedDate || !startTime || !endTime || resources.length === 0) return;
+      
+      try {
+        // Get all bookings
+        const allBookings = await viewAllBookings();
+        
+        // Parse selected time range
+        const [startHour, startMin] = startTime.split(':').map(Number);
+        const [endHour, endMin] = endTime.split(':').map(Number);
+        const selectedStartMinutes = startHour * 60 + startMin;
+        const selectedEndMinutes = endHour * 60 + endMin;
+        
+        // Get weekday for schedule checking
+        const bookingDate = new Date(selectedDate);
+        const weekday = bookingDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+        
+        // Check each resource
+        const availability = {};
+        
+        for (const resource of resources) {
+          // 1. Check if resource has schedule for this weekday
+          let hasSchedule = false;
+          try {
+            const scheduleResponse = await getResourceScheduleInfo(resource.name);
+            const scheduleBlocks = Array.isArray(scheduleResponse) 
+              ? scheduleResponse 
+              : (scheduleResponse?.schedule_blocks || []);
+            
+            // Check if any schedule block covers the selected time
+            hasSchedule = scheduleBlocks.some(block => {
+              if ((block.weekday || '').toLowerCase() !== weekday) return false;
+              
+              const [blockStartH, blockStartM] = block.start_time.split(':').map(Number);
+              const [blockEndH, blockEndM] = block.end_time.split(':').map(Number);
+              const blockStart = blockStartH * 60 + blockStartM;
+              const blockEnd = blockEndH * 60 + blockEndM;
+              
+              // Check if selected time range is within schedule block
+              return selectedStartMinutes >= blockStart && selectedEndMinutes <= blockEnd;
+            });
+          } catch (e) {
+            console.error(`Error checking schedule for ${resource.name}:`, e);
+          }
+          
+          if (!hasSchedule) {
+            availability[resource.id] = false;
+            continue;
+          }
+          
+          // 2. Check if resource is booked during selected time
+          const resourceBookings = allBookings.filter(b => {
+            const matchesResource = b.resource?.name === resource.name;
+            const bookingStartDate = new Date(b.starts_at).toDateString();
+            const targetDate = bookingDate.toDateString();
+            return matchesResource && bookingStartDate === targetDate && !b.is_canceled;
+          });
+          
+          // Check for conflicts
+          const hasConflict = resourceBookings.some(b => {
+            const bookingStart = new Date(b.starts_at);
+            const bookingEnd = new Date(b.ends_at);
+            
+            const bStartH = bookingStart.getHours();
+            const bStartM = bookingStart.getMinutes();
+            const bEndH = bookingEnd.getHours();
+            const bEndM = bookingEnd.getMinutes();
+            
+            const bookingStartMin = bStartH * 60 + bStartM;
+            const bookingEndMin = bEndH * 60 + bEndM;
+            
+            // Check overlap
+            return (selectedStartMinutes < bookingEndMin && selectedEndMinutes > bookingStartMin);
+          });
+          
+          availability[resource.id] = !hasConflict;
+        }
+        
+        setResourceAvailability(availability);
+      } catch (error) {
+        console.error('Error checking availability:', error);
+      }
+    };
+    
+    checkAvailability();
+  }, [selectedDate, startTime, endTime, resources]);
 
-  // Sample calendar events
-  const calendarEvents = {
-    'Sun-28': [],
-    'Mon-29': [
-      { name: '2A Meeting Room - Large', time: '03:00 pm' },
-      { name: 'UGA Event hall', time: '09:00 am' },
-      { name: '2A Meeting Room - Large', time: '11:00 am' },
-      { name: '2A Meeting Room - Small', time: '11:00 am' },
-      { name: '1B Meeting Room', time: '04:00 pm' },
-      { name: '3A Meeting Room', time: '05:30 pm' },
-      { name: 'UGA Event hall', time: '07:00 pm' },
-    ],
-    'Tue-30': [
-      { name: 'UGA Event hall', time: '09:00 am' },
-      { name: '2A Meeting Room - Small', time: '09:00 am' },
-      { name: '1B Meeting Room', time: '10:00 am' },
-      { name: '2A Meeting Room - Small', time: '11:30 am' },
-      { name: '1B Meeting Room', time: '02:00 pm' },
-      { name: '2A Meeting Room - Large', time: '03:30 pm' },
-    ],
-    'Wed-1': [
-      { name: '1B Meeting Room', time: '10:00 am' },
-      { name: '3A Meeting Room', time: '10:00 am' },
-      { name: '3B VIP Room', time: '01:30 pm' },
-      { name: 'UGA Event hall', time: '02:00 pm' },
-      { name: '1B Meeting Room', time: '04:30 pm' },
-    ],
-    'Thu-2': [
-      { name: '1B Meeting Room', time: '09:00 am' },
-      { name: '1B Meeting Room', time: '02:00 pm' },
-      { name: '1B Meeting Room', time: '04:00 pm' },
-    ],
-    'Fri-3': [
-      { name: '1B Meeting Room', time: '09:00 am' },
-      { name: '3A Meeting Room', time: '10:00 am' },
-      { name: '1B Meeting Room', time: '02:00 pm' },
-    ],
-    'Sat-4': [],
+  // Load bookings for calendar view
+  useEffect(() => {
+    const loadCalendarBookings = async () => {
+      try {
+        const allBookings = await viewAllBookings();
+        setCalendarBookings(allBookings);
+      } catch (error) {
+        console.error('Error loading calendar bookings:', error);
+      }
+    };
+    
+    if (view === 'calendar') {
+      loadCalendarBookings();
+    }
+  }, [view, currentViewDate, calendarView]);
+
+  // Generate calendar dates based on view type
+  const generateCalendarDates = () => {
+    const dates = [];
+    
+    if (calendarView === 'Week') {
+      // Show 7 days starting from current week start (Sunday)
+      for (let i = 0; i < 7; i++) {
+        const date = currentViewDate.startOf('week').plus({ days: i });
+        dates.push({
+          day: date.toFormat('EEE'),
+          date: date.day,
+          fullDate: date.toFormat('yyyy-MM-dd'),
+          key: `${date.toFormat('EEE')}-${date.day}`
+        });
+      }
+    } else if (calendarView === 'Month') {
+      // Show entire month in grid format
+      const startOfMonth = currentViewDate.startOf('month');
+      const endOfMonth = currentViewDate.endOf('month');
+      const startDate = startOfMonth.startOf('week'); // Start from Sunday
+      const endDate = endOfMonth.endOf('week'); // End on Saturday
+      
+      let currentDate = startDate;
+      while (currentDate <= endDate) {
+        dates.push({
+          day: currentDate.toFormat('EEE'),
+          date: currentDate.day,
+          fullDate: currentDate.toFormat('yyyy-MM-dd'),
+          key: `${currentDate.toFormat('EEE')}-${currentDate.day}`,
+          isCurrentMonth: currentDate.month === currentViewDate.month
+        });
+        currentDate = currentDate.plus({ days: 1 });
+      }
+    } else if (calendarView === 'Day') {
+      // Show single day
+      const date = currentViewDate;
+      dates.push({
+        day: date.toFormat('EEEE'),
+        date: date.day,
+        fullDate: date.toFormat('yyyy-MM-dd'),
+        key: `${date.toFormat('EEE')}-${date.day}`
+      });
+    } else if (calendarView === '30 days') {
+      // Show 30 days starting from current date
+      for (let i = 0; i < 30; i++) {
+        const date = currentViewDate.plus({ days: i });
+        dates.push({
+          day: date.toFormat('EEE'),
+          date: date.day,
+          fullDate: date.toFormat('yyyy-MM-dd'),
+          key: `${date.toFormat('EEE')}-${date.day}-${date.month}`
+        });
+      }
+    }
+    
+    return dates;
+  };
+  
+  // Navigation handlers
+  const goToToday = () => {
+    const now = DateTime.now();
+    setCurrentViewDate(now);
+    setCurrentWeekStart(now.startOf('week'));
+    setCurrentMonth(now.toFormat('MMMM yyyy'));
+  };
+  
+  const goToPrevious = () => {
+    let newDate;
+    if (calendarView === 'Week') {
+      newDate = currentViewDate.minus({ weeks: 1 });
+    } else if (calendarView === 'Month') {
+      newDate = currentViewDate.minus({ months: 1 });
+    } else if (calendarView === 'Day') {
+      newDate = currentViewDate.minus({ days: 1 });
+    } else if (calendarView === '30 days') {
+      newDate = currentViewDate.minus({ days: 30 });
+    }
+    setCurrentViewDate(newDate);
+    setCurrentWeekStart(newDate.startOf('week'));
+    setCurrentMonth(newDate.toFormat('MMMM yyyy'));
+  };
+  
+  const goToNext = () => {
+    let newDate;
+    if (calendarView === 'Week') {
+      newDate = currentViewDate.plus({ weeks: 1 });
+    } else if (calendarView === 'Month') {
+      newDate = currentViewDate.plus({ months: 1 });
+    } else if (calendarView === 'Day') {
+      newDate = currentViewDate.plus({ days: 1 });
+    } else if (calendarView === '30 days') {
+      newDate = currentViewDate.plus({ days: 30 });
+    }
+    setCurrentViewDate(newDate);
+    setCurrentWeekStart(newDate.startOf('week'));
+    setCurrentMonth(newDate.toFormat('MMMM yyyy'));
+  };
+
+  // Group bookings by date
+  const getBookingsForDate = (dateString) => {
+    return calendarBookings
+      .filter(booking => {
+        if (!booking.starts_at || booking.is_canceled) return false;
+        const bookingDate = new Date(booking.starts_at).toISOString().split('T')[0];
+        return bookingDate === dateString;
+      })
+      .map(booking => {
+        const startTime = new Date(booking.starts_at);
+        const hours = startTime.getHours();
+        const minutes = startTime.getMinutes();
+        const ampm = hours >= 12 ? 'pm' : 'am';
+        const displayHours = hours % 12 || 12;
+        const timeStr = `${displayHours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')} ${ampm}`;
+        
+        return {
+          name: booking.resource?.name || 'Resource',
+          time: timeStr,
+          id: booking.id,
+          customerName: booking.metadata?.customer_name || 'Guest'
+        };
+      });
   };
 
   const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const dates = [
-    { day: 'Sun', date: 28, key: 'Sun-28' },
-    { day: 'Mon', date: 29, key: 'Mon-29' },
-    { day: 'Tue', date: 30, key: 'Tue-30' },
-    { day: 'Wed', date: 1, key: 'Wed-1' },
-    { day: 'Thu', date: 2, key: 'Thu-2' },
-    { day: 'Fri', date: 3, key: 'Fri-3' },
-    { day: 'Sat', date: 4, key: 'Sat-4' },
-  ];
+  const dates = generateCalendarDates();
 
   const handleBookResource = (resource) => {
-    navigate(`/booking/${resource.id}`, { 
+    navigate(`/book-resource/${resource.id}`, { 
       state: { 
-        booking: {
+        resource: {
           ...resource,
           date: selectedDate,
-          time: `${startTime} - ${endTime}`,
-          location: 'CUHK InnoPort'
+          startTime,
+          endTime
         } 
       } 
     });
@@ -593,37 +917,42 @@ export default function Bookings() {
         {/* Header with Filters */}
         <div className="mb-6">
           <div className="flex items-center justify-between mb-4">
-            {/* Resource Filter Dropdown */}
-            <div className="relative">
-              <button
-                onClick={() => setIsResourceFilterOpen(!isResourceFilterOpen)}
-                className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
-                style={{ fontFamily: 'Inter' }}
-              >
-                <span>{resourceFilter}</span>
-                <ChevronDown className="w-4 h-4" />
-              </button>
+            {/* Resource Filter Dropdown - Only in Grid View */}
+            {view === 'grid' && (
+              <div className="relative">
+                <button
+                  onClick={() => setIsResourceFilterOpen(!isResourceFilterOpen)}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
+                  style={{ fontFamily: 'Inter' }}
+                >
+                  <span>{resourceFilter}</span>
+                  <ChevronDown className="w-4 h-4" />
+                </button>
 
-              {isResourceFilterOpen && (
-                <div className="absolute left-0 mt-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-10">
-                  {resourceOptions.map((option) => (
-                    <button
-                      key={option}
-                      onClick={() => {
-                        setResourceFilter(option);
-                        setIsResourceFilterOpen(false);
-                      }}
-                      className={`w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50 transition-colors first:rounded-t-lg last:rounded-b-lg ${
-                        resourceFilter === option ? 'text-blue-600 font-medium bg-blue-50' : 'text-gray-700'
-                      }`}
-                      style={{ fontFamily: 'Inter' }}
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+                {isResourceFilterOpen && (
+                  <div className="absolute left-0 mt-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-10">
+                    {resourceOptions.map((option) => (
+                      <button
+                        key={option}
+                        onClick={() => {
+                          setResourceFilter(option);
+                          setIsResourceFilterOpen(false);
+                        }}
+                        className={`w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50 transition-colors first:rounded-t-lg last:rounded-b-lg ${
+                          resourceFilter === option ? 'text-blue-600 font-medium bg-blue-50' : 'text-gray-700'
+                        }`}
+                        style={{ fontFamily: 'Inter' }}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* Spacer for calendar view */}
+            {view === 'calendar' && <div></div>}
 
             {/* View Toggle Buttons */}
             <div className="flex items-center gap-2">
@@ -661,18 +990,12 @@ export default function Bookings() {
                   </label>
                   <div className="relative">
                     <input
-                      type="text"
+                      type="date"
                       value={selectedDate}
                       onChange={(e) => setSelectedDate(e.target.value)}
-                      placeholder="DD/MM/YYYY"
-                      className="w-40 px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      className="w-44 px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                       style={{ fontFamily: 'Inter' }}
                     />
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                      <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                      </svg>
-                    </div>
                   </div>
                 </div>
 
@@ -684,17 +1007,13 @@ export default function Bookings() {
                   <div className="flex items-center gap-2">
                     <div className="relative">
                       <input
-                        type="text"
+                        type="time"
+                        step="900"
                         value={startTime}
                         onChange={(e) => setStartTime(e.target.value)}
-                        className="w-32 px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                        className="w-36 px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                         style={{ fontFamily: 'Inter' }}
                       />
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                      </div>
                     </div>
                     
                     <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -703,31 +1022,105 @@ export default function Bookings() {
                     
                     <div className="relative">
                       <input
-                        type="text"
+                        type="time"
+                        step="900"
                         value={endTime}
                         onChange={(e) => setEndTime(e.target.value)}
-                        className="w-32 px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                        className="w-36 px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                         style={{ fontFamily: 'Inter' }}
                       />
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                      </div>
                     </div>
                   </div>
                 </div>
               </div>
 
               {/* Other Filters Button */}
-              <button
-                onClick={() => setIsOtherFiltersOpen(!isOtherFiltersOpen)}
-                className="flex items-center gap-2 px-4 py-2.5 border border-gray-300 rounded-lg text-sm text-gray-700 bg-white hover:bg-gray-50 transition-colors"
-                style={{ fontFamily: 'Inter' }}
-              >
-                <span>Other filters</span>
-                <SlidersHorizontal className="w-4 h-4" />
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setIsOtherFiltersOpen(!isOtherFiltersOpen)}
+                  className="flex items-center gap-2 px-4 py-2.5 border border-gray-300 rounded-lg text-sm text-gray-700 bg-white hover:bg-gray-50 transition-colors"
+                  style={{ fontFamily: 'Inter' }}
+                >
+                  <span>Other filters</span>
+                  <SlidersHorizontal className="w-4 h-4" />
+                </button>
+                
+                {/* Other Filters Dropdown */}
+                {isOtherFiltersOpen && (
+                  <div className="absolute right-0 mt-2 w-72 bg-white border border-gray-200 rounded-lg shadow-lg z-10 p-4"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="space-y-4">
+                      {/* Capacity Filter */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2" style={{ fontFamily: 'Inter' }}>
+                          Capacity
+                        </label>
+                        <select
+                          value={capacityFilter}
+                          onChange={(e) => setCapacityFilter(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                          style={{ fontFamily: 'Inter' }}
+                        >
+                          <option value="Any">Any capacity</option>
+                          <option value="1-5">1-5 people</option>
+                          <option value="6-10">6-10 people</option>
+                          <option value="11-15">11-15 people</option>
+                          <option value="16-20">16-20 people</option>
+                          <option value="20+">20+ people</option>
+                        </select>
+                      </div>
+                      
+                      {/* Features Filter */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2" style={{ fontFamily: 'Inter' }}>
+                          Features {selectedFeatures.length > 0 && `(${selectedFeatures.length} selected)`}
+                        </label>
+                        <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg p-3 bg-white space-y-2">
+                          {['Projector', 'Whiteboard', 'Video Conference', 'WiFi', 'Air Conditioning', 'Coffee Machine', 'TV Screen', 'Microphone', 'Sound System', 'Parking'].map((feature) => (
+                            <label key={feature} className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 p-1 rounded">
+                              <input
+                                type="checkbox"
+                                checked={selectedFeatures.includes(feature)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedFeatures([...selectedFeatures, feature]);
+                                  } else {
+                                    setSelectedFeatures(selectedFeatures.filter(f => f !== feature));
+                                  }
+                                }}
+                                className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                              />
+                              <span className="text-sm text-gray-700" style={{ fontFamily: 'Inter' }}>{feature}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                      
+                      {/* Filter Actions */}
+                      <div className="flex items-center gap-2 pt-3 border-t border-gray-200">
+                        <button
+                          onClick={() => {
+                            setCapacityFilter('Any');
+                            setSelectedFeatures([]);
+                          }}
+                          className="flex-1 px-3 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+                          style={{ fontFamily: 'Inter' }}
+                        >
+                          Clear
+                        </button>
+                        <button
+                          onClick={() => setIsOtherFiltersOpen(false)}
+                          className="flex-1 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
+                          style={{ fontFamily: 'Inter' }}
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -753,21 +1146,22 @@ export default function Bookings() {
               </div>
 
               {/* Month Navigation */}
-              <div className="flex items-center gap-4">
-                <button className="text-blue-600 text-sm font-medium hover:underline" style={{ fontFamily: 'Inter' }}>
-                  Today
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={goToPrevious}
+                  className="p-1 hover:bg-gray-100 rounded"
+                >
+                  <ChevronLeft className="w-5 h-5 text-gray-600" />
                 </button>
-                <div className="flex items-center gap-2">
-                  <button className="p-1 hover:bg-gray-100 rounded">
-                    <ChevronLeft className="w-5 h-5 text-gray-600" />
-                  </button>
-                  <span className="text-lg font-semibold text-gray-900 min-w-[150px] text-center" style={{ fontFamily: 'Inter' }}>
-                    {currentMonth}
-                  </span>
-                  <button className="p-1 hover:bg-gray-100 rounded">
-                    <ChevronRight className="w-5 h-5 text-gray-600" />
-                  </button>
-                </div>
+                <span className="text-lg font-semibold text-gray-900 min-w-[150px] text-center" style={{ fontFamily: 'Inter' }}>
+                  {currentViewDate.toFormat('MMMM yyyy')}
+                </span>
+                <button 
+                  onClick={goToNext}
+                  className="p-1 hover:bg-gray-100 rounded"
+                >
+                  <ChevronRight className="w-5 h-5 text-gray-600" />
+                </button>
               </div>
             </div>
           )}
@@ -789,14 +1183,52 @@ export default function Bookings() {
                 No resources available.
               </div>
             ) : (
-              resources.map((resource) => (
-                <ResourceCard
-                  key={resource.id}
-                  resource={resource}
-                  selectedDate={selectedDate}
-                  onBook={handleBookResource}
-                />
-              ))
+              resources
+                .filter(r => {
+                  // Filter by resource type/category
+                  if (resourceFilter !== 'All Resources' && r.type !== resourceFilter) {
+                    return false;
+                  }
+                  
+                  // Filter by availability (date/time)
+                  if (resourceAvailability[r.id] === false) {
+                    return false;
+                  }
+                  
+                  // Filter by capacity
+                  if (capacityFilter !== 'Any') {
+                    const capacity = r.capacity || 0;
+                    if (capacityFilter === '1-5' && (capacity < 1 || capacity > 5)) return false;
+                    if (capacityFilter === '6-10' && (capacity < 6 || capacity > 10)) return false;
+                    if (capacityFilter === '11-15' && (capacity < 11 || capacity > 15)) return false;
+                    if (capacityFilter === '16-20' && (capacity < 16 || capacity > 20)) return false;
+                    if (capacityFilter === '20+' && capacity < 20) return false;
+                  }
+                  
+                  // Filter by features (if any selected)
+                  if (selectedFeatures.length > 0) {
+                    // Check if resource has ALL the selected features
+                    // This is placeholder logic - in real implementation, check resource metadata for features
+                    // For now, we show all resources (backend needs to provide feature data in resource metadata)
+                    // TODO: When backend provides feature data, check:
+                    // const hasAllFeatures = selectedFeatures.every(feature => 
+                    //   r.metadata?.features?.includes(feature)
+                    // );
+                    // if (!hasAllFeatures) return false;
+                  }
+                  
+                  return true;
+                })
+                .map((resource) => (
+                  <ResourceCard
+                    key={resource.id}
+                    resource={resource}
+                    selectedDate={selectedDate}
+                    selectedStartTime={startTime}
+                    selectedEndTime={endTime}
+                    onBook={handleBookResource}
+                  />
+                ))
             )}
           </div>
         )}
@@ -804,44 +1236,138 @@ export default function Bookings() {
         {/* Calendar View */}
         {view === 'calendar' && (
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            {/* Calendar Header */}
-            <div className="grid grid-cols-7 border-b border-gray-200">
-              {days.map((day) => (
-                <div
-                  key={day}
-                  className="p-4 text-center text-sm font-semibold text-gray-700 border-r border-gray-200 last:border-r-0"
-                  style={{ fontFamily: 'Inter' }}
-                >
-                  {day}
-                </div>
-              ))}
-            </div>
+            {/* Calendar Header - Only show for Week and Month views */}
+            {(calendarView === 'Week' || calendarView === 'Month') && (
+              <div className="grid grid-cols-7 border-b border-gray-200">
+                {days.map((day) => (
+                  <div
+                    key={day}
+                    className="p-4 text-center text-sm font-semibold text-gray-700 border-r border-gray-200 last:border-r-0"
+                    style={{ fontFamily: 'Inter' }}
+                  >
+                    {day}
+                  </div>
+                ))}
+              </div>
+            )}
 
-            {/* Calendar Grid */}
-            <div className="grid grid-cols-7">
-              {dates.map((dateInfo) => (
-                <div
-                  key={dateInfo.key}
-                  className="border-r border-gray-200 last:border-r-0 min-h-[150px] p-2 bg-gray-50/50"
-                  style={{
-                    backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 1px, rgba(229, 231, 235, 0.3) 1px, rgba(229, 231, 235, 0.3) 2px)'
-                  }}
-                >
-                  <div className="text-sm font-medium text-gray-500 mb-2" style={{ fontFamily: 'Inter' }}>
-                    {dateInfo.date}
+            {/* Calendar Grid - Week and Month views */}
+            {(calendarView === 'Week' || calendarView === 'Month') && (
+              <div className={`grid ${
+                calendarView === 'Week' ? 'grid-cols-7' : 
+                `grid-cols-7 gap-0`
+              }`}>
+                {dates.map((dateInfo) => (
+                  <div
+                    key={dateInfo.key}
+                    className={`border-r border-b border-gray-200 last:border-r-0 min-h-[150px] p-2 ${
+                      dateInfo.isCurrentMonth === false ? 'bg-gray-100/50' : 'bg-gray-50/50'
+                    }`}
+                    style={{
+                      backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 1px, rgba(229, 231, 235, 0.3) 1px, rgba(229, 231, 235, 0.3) 2px)'
+                    }}
+                  >
+                    <div className={`text-sm font-medium mb-2 ${
+                      dateInfo.isCurrentMonth === false ? 'text-gray-400' : 'text-gray-500'
+                    }`} style={{ fontFamily: 'Inter' }}>
+                      {dateInfo.date}
+                    </div>
+                    <div className="space-y-1">
+                      {getBookingsForDate(dateInfo.fullDate)?.map((event, idx) => (
+                        <CalendarEvent
+                          key={event.id || idx}
+                          event={event}
+                          onClick={() => {}}
+                        />
+                      ))}
+                    </div>
                   </div>
-                  <div className="space-y-1">
-                    {calendarEvents[dateInfo.key]?.map((event, idx) => (
-                      <CalendarEvent
-                        key={idx}
-                        event={event}
-                        onClick={() => {}}
-                      />
-                    ))}
-                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Day View - Single day with detailed bookings */}
+            {calendarView === 'Day' && dates.length > 0 && (
+              <div className="p-6">
+                <div className="text-center mb-6">
+                  <h3 className="text-2xl font-semibold text-gray-900" style={{ fontFamily: 'Inter' }}>
+                    {dates[0].day}
+                  </h3>
+                  <p className="text-lg text-gray-600" style={{ fontFamily: 'Inter' }}>
+                    {currentViewDate.toFormat('MMMM d, yyyy')}
+                  </p>
                 </div>
-              ))}
-            </div>
+                <div className="max-w-2xl mx-auto space-y-2">
+                  {getBookingsForDate(dates[0].fullDate).length > 0 ? (
+                    getBookingsForDate(dates[0].fullDate).map((event, idx) => (
+                      <div
+                        key={event.id || idx}
+                        className="bg-blue-50 border-l-4 border-blue-600 px-4 py-3 rounded hover:bg-blue-100 transition-colors cursor-pointer"
+                        style={{ fontFamily: 'Inter' }}
+                      >
+                        <div className="flex justify-between items-center">
+                          <div className="font-semibold text-gray-900">{event.name}</div>
+                          <div className="text-gray-600">{event.time}</div>
+                        </div>
+                        {event.customerName && (
+                          <div className="text-sm text-gray-600 mt-1">Booked by: {event.customerName}</div>
+                        )}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-center py-8 text-gray-500" style={{ fontFamily: 'Inter' }}>
+                      No bookings for this day
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* 30 Days View - Scrollable list */}
+            {calendarView === '30 days' && (
+              <div className="max-h-[600px] overflow-y-auto">
+                {dates.map((dateInfo) => {
+                  const bookingsForDay = getBookingsForDate(dateInfo.fullDate);
+                  return (
+                    <div
+                      key={dateInfo.key}
+                      className="border-b border-gray-200 p-4 hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-start gap-4">
+                        <div className="flex-shrink-0 text-center">
+                          <div className="text-sm font-medium text-gray-600" style={{ fontFamily: 'Inter' }}>
+                            {dateInfo.day}
+                          </div>
+                          <div className="text-2xl font-bold text-gray-900" style={{ fontFamily: 'Inter' }}>
+                            {dateInfo.date}
+                          </div>
+                        </div>
+                        <div className="flex-1 space-y-1">
+                          {bookingsForDay.length > 0 ? (
+                            bookingsForDay.map((event, idx) => (
+                              <div
+                                key={event.id || idx}
+                                className="bg-blue-50 border-l-2 border-blue-600 px-3 py-2 rounded text-sm"
+                                style={{ fontFamily: 'Inter' }}
+                              >
+                                <div className="flex justify-between">
+                                  <span className="font-medium text-gray-900">{event.name}</span>
+                                  <span className="text-gray-600">{event.time}</span>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-sm text-gray-400" style={{ fontFamily: 'Inter' }}>
+                              No bookings
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>

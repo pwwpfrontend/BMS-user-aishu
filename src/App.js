@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard';
 import BookingDetails from './pages/BookingDetails';
 import Activity from './pages/Activity';
 import Bookings from './pages/Bookings';
+import BookResource from './pages/BookResource';
 import Plans from './pages/Plans';
 import DashboardTeam from './pages/Team';
 import MyProfile from './pages/Profile';
@@ -91,6 +92,7 @@ function App() {
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="booking/:id" element={<BookingDetails />} />
           <Route path="bookings" element={<Bookings />} />
+          <Route path="book-resource/:id" element={<BookResource />} />
           <Route path="dashboard/individual" element={<Dashboard view="individual" />} />
           <Route path="dashboard/team" element={<DashboardTeam />} />
           
