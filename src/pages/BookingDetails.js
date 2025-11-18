@@ -48,6 +48,12 @@ function getTimezoneOffset(tz) {
   return offsets[tz] || '+00:00';
 }
 
+// Utility functions for formatting
+function formatCategoryName(categoryName) {
+  if (!categoryName) return 'Resource';
+  return categoryName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
 // API helpers
 async function apiRequest(endpoint, options = {}) {
   const url = `${API_BASE_URL}${endpoint}`;
@@ -313,17 +319,19 @@ export default function BookingDetails() {
       if (!booking?.resource) return;
       let mongoId = booking?.resource?.mongoId || booking?.resource?.mongo_id || booking?.resource?.metadata?.mongo_id || booking?.resource?._id;
       try {
-        // Fallback: look up by name if mongoId missing
-        if (!mongoId && booking?.resource?.name) {
-          const name = encodeURIComponent(booking.resource.name);
-          const res = await fetch(`${API_BASE_URL}/viewResource/${name}`);
-          if (res.ok) {
-            const json = await res.json();
-            const item = json?.data?.[0] || null;
-            mongoId = item?.mongo_id || item?.metadata?.mongo_id || mongoId;
+        // Fallback: get mongo_id from all resources list by resource ID
+        if (!mongoId && booking?.resource?.id) {
+          const allResourcesRes = await fetch(`${API_BASE_URL}/viewAllresources`);
+          if (allResourcesRes.ok) {
+            const allResources = await allResourcesRes.json();
+            const matchingResource = allResources.find(r => r.id === booking.resource.id);
+            mongoId = matchingResource?.mongo_id;
           }
         }
-        if (!mongoId) return;
+        if (!mongoId) {
+          console.warn('Could not find mongo_id for resource:', booking?.resource?.name);
+          return;
+        }
         const resp = await fetch(`${API_BASE_URL}/resource/${mongoId}`);
         if (!resp.ok) return;
         const data = await resp.json();
@@ -340,14 +348,17 @@ export default function BookingDetails() {
             }
           });
         });
-        if (mounted && enabled.length>0) setFeaturesText(enabled.join(' • '));
+        if (mounted && enabled.length>0) {
+          setFeaturesText(enabled.join(' • '));
+          console.log('Features loaded:', enabled.join(' • '));
+        }
       } catch (e) {
-        // ignore
+        console.error('Error loading features:', e);
       }
     };
     load();
     return ()=>{ mounted=false; };
-  }, [booking?.resource?.name]);
+  }, [booking?.resource?.id]);
 
   // Load service and schedule for resource
   useEffect(() => {
@@ -516,7 +527,23 @@ export default function BookingDetails() {
   const resourceImage = booking?.resource?.metadata?.photo_url || 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop';
   const resourceName = booking?.resource?.name || 'Unknown Resource';
   const capacity = booking?.resource?.metadata?.capacity || booking?.resource?.max_simultaneous_bookings || 1;
-  const category = booking?.resource?.metadata?.category || 'Resource';
+  const category = formatCategoryName(booking?.resource?.metadata?.category) || 'Resource';
+  // Get price from booking data
+  const formatBookingPrice = (booking) => {
+    if (booking?.price) {
+      const priceNum = parseFloat(booking.price);
+      return `$${priceNum}`;
+    } else if (booking?.resource?.metadata?.rates && Array.isArray(booking.resource.metadata.rates) && booking.resource.metadata.rates.length > 0) {
+      const firstRate = booking.resource.metadata.rates[0];
+      if (firstRate.price !== undefined) {
+        return `$${firstRate.price}`;
+      } else if (firstRate.price_name) {
+        return firstRate.price_name;
+      }
+    }
+    return 'Free of Charge';
+  };
+  const bookingPrice = formatBookingPrice(booking);
   const bookingStartHK = new Date(booking?.starts_at || Date.now());
   const isPastBooking = bookingStartHK < new Date();
 
@@ -569,15 +596,21 @@ export default function BookingDetails() {
                   <h1 className="text-2xl font-semibold text-gray-900 mb-2" style={{ fontFamily: 'Inter' }}>{resourceName}</h1>
                   <div className="flex items-center gap-4 mb-3">
                     <div className="flex items-center gap-1 text-sm text-gray-600"><Users className="w-4 h-4" /><span style={{ fontFamily: 'Inter' }}>x{capacity}</span></div>
-                    {booking?.service?.name && (<span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>{booking.service.name}</span>)}
+                    <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>{bookingPrice}</span>
                     {category && (<span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>{category}</span>)}
                   </div>
                   {booking?.resource?.metadata?.resource_details?.description && (
-                    <div className="flex items-center gap-2 text-sm text-gray-600" style={{ fontFamily: 'Inter' }}>
-                      <span>ℹ️ {booking.resource.metadata.resource_details.description}</span>
+                    <div className="text-sm text-gray-700 mt-2 flex items-start gap-2" style={{ fontFamily: 'Inter' }}>
+                      <span className="text-gray-400 flex-shrink-0">✓</span>
+                      <span>{booking.resource.metadata.resource_details.description}</span>
                     </div>
                   )}
-                  {featuresText && (<div className="flex items-center gap-2 text-sm text-gray-700 mt-1" style={{ fontFamily: 'Inter' }}><span>✓ {featuresText}</span></div>)}
+                  {featuresText && (
+                    <div className="text-sm text-gray-700 mt-2 flex items-start gap-2" style={{ fontFamily: 'Inter' }}>
+                      <span className="text-gray-400 flex-shrink-0">✓</span>
+                      <span>{featuresText}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

@@ -5,6 +5,26 @@ import { Toast } from '../components/Toast';
 
 const API_BASE_URL = 'https://njs-01.optimuslab.space/booking_system';
 
+// Utility functions for formatting
+function formatCategoryName(categoryName) {
+  if (!categoryName) return 'Resource';
+  return categoryName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function formatPricingDisplay(resource) {
+  if (!resource?.metadata?.rates || !Array.isArray(resource.metadata.rates) || resource.metadata.rates.length === 0) {
+    return 'Free of Charge';
+  }
+  
+  const firstRate = resource.metadata.rates[0];
+  if (firstRate.price !== undefined) {
+    return `$${firstRate.price}`;
+  } else if (firstRate.price_name) {
+    return firstRate.price_name;
+  }
+  return 'Free of Charge';
+}
+
 // Utils from AddBookingForm
 function parseDuration(duration) {
   if (!duration) return 60;
@@ -265,6 +285,35 @@ export default function BookResource() {
   const [error, setError] = useState('');
   const [activeTimePicker, setActiveTimePicker] = useState(null);
   const [toast, setToast] = useState(null); // { message, type }
+  const [featuresText, setFeaturesText] = useState('');
+
+  // Fetch resource features by mongo id if available
+  useEffect(() => {
+    let isMounted = true;
+    const fetchFeatures = async () => {
+      const mongoId = resource?.mongo_id || resource?.metadata?.mongo_id;
+      if (!mongoId) return;
+      try {
+        const resp = await fetch(`${API_BASE_URL}/resource/${mongoId}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const groups = ['features', 'amenities', 'security'];
+        const enabled = [];
+        groups.forEach(g => {
+          const obj = data[g] || {};
+          Object.entries(obj).forEach(([k, v]) => {
+            if (v && v.enabled) {
+              const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+              enabled.push(label);
+            }
+          });
+        });
+        if (isMounted && enabled.length > 0) setFeaturesText(enabled.join(' • '));
+      } catch (_) {}
+    };
+    fetchFeatures();
+    return () => { isMounted = false; };
+  }, [resource?.mongo_id, resource?.metadata?.mongo_id]);
 
   // Load resource data on mount
   useEffect(() => {
@@ -532,8 +581,8 @@ export default function BookResource() {
                       <User className="w-4 h-4" />
                       <span style={{ fontFamily: 'Inter' }}>x{resource.capacity}</span>
                     </div>
-                    <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>{resource.type}</span>
-                    <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>{resource.pricing}</span>
+                    <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>{formatCategoryName(resource.metadata?.category || resource.type)}</span>
+                    <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded-full" style={{ fontFamily: 'Inter' }}>{formatPricingDisplay(resource)}</span>
                   </div>
                   {resource.amenities && (
                     <div className="flex items-center gap-2 text-sm text-gray-600" style={{ fontFamily: 'Inter' }}>
@@ -543,6 +592,12 @@ export default function BookResource() {
                   {serviceDetails && (
                     <div className="flex items-center gap-2 text-sm text-gray-700 mt-1" style={{ fontFamily: 'Inter' }}>
                       <span>✓ {serviceDetails.name}</span>
+                    </div>
+                  )}
+                  {featuresText && (
+                    <div className="text-sm text-gray-700 mt-2 flex items-start gap-2" style={{ fontFamily: 'Inter' }}>
+                      <span className="text-gray-400 flex-shrink-0">✓</span>
+                      <span>{featuresText}</span>
                     </div>
                   )}
                 </div>
@@ -664,7 +719,7 @@ export default function BookResource() {
 
           {/* Right Sidebar - Booking Summary */}
           <div className="lg:col-span-1">
-            <div className="bg-white rounded-xl border border-gray-200 p-6 sticky top-8">
+            <div className="bg-white rounded-xl border border-gray-200 p-6 sticky top-8" style={{ marginTop: '48px' }}>
               <h3 className="text-lg font-semibold text-gray-900 mb-4" style={{ fontFamily: 'Inter' }}>Booking Summary</h3>
               
               <div className="space-y-4">
@@ -711,7 +766,7 @@ export default function BookResource() {
                 
                 <div>
                   <p className="text-sm text-gray-600" style={{ fontFamily: 'Inter' }}>Price</p>
-                  <p className="font-medium text-gray-900" style={{ fontFamily: 'Inter' }}>{resource.pricing}</p>
+                  <p className="font-medium text-gray-900" style={{ fontFamily: 'Inter' }}>{formatPricingDisplay(resource)}</p>
                 </div>
               </div>
             </div>

@@ -191,6 +191,29 @@ function formatDateToYYYYMMDD(dateTime) {
   return dateTime.toFormat('yyyy-MM-dd');
 }
 
+// Utility functions for formatting
+function formatCategoryName(categoryName) {
+  if (!categoryName) return 'Resource';
+  return categoryName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// Date format conversion functions
+function formatDateToDDMMYYYY(dateString) {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+function parseDDMMYYYYToISO(ddmmyyyy) {
+  if (!ddmmyyyy) return '';
+  const [day, month, year] = ddmmyyyy.split('/');
+  if (!day || !month || !year) return '';
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
 // Resource Card Component for Grid View
 const ResourceCard = ({ resource, onBook, selectedDate, selectedStartTime, selectedEndTime }) => {
   const [hoveredSlot, setHoveredSlot] = useState(null);
@@ -578,9 +601,10 @@ export default function Bookings() {
   
 // Set default date to today
   const today = DateTime.now();
-  const [selectedDate, setSelectedDate] = useState(today.toFormat('yyyy-LL-dd'));
-  const [startTime, setStartTime] = useState('15:00');
-  const [endTime, setEndTime] = useState('16:00');
+  const [selectedDate, setSelectedDate] = useState(today.toFormat('yyyy-LL-dd')); // Internal format
+  const [displayDate, setDisplayDate] = useState(today.toFormat('dd/LL/yyyy')); // Display format
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
   const [resourceFilter, setResourceFilter] = useState('All Resources');
   const [isResourceFilterOpen, setIsResourceFilterOpen] = useState(false);
   const [isOtherFiltersOpen, setIsOtherFiltersOpen] = useState(false);
@@ -588,6 +612,7 @@ export default function Bookings() {
   // Additional filters state
   const [capacityFilter, setCapacityFilter] = useState('Any');
   const [selectedFeatures, setSelectedFeatures] = useState([]);
+  const [availableFeatures, setAvailableFeatures] = useState([]);
   
   // Resources state
   const [resources, setResources] = useState([]);
@@ -618,16 +643,43 @@ export default function Bookings() {
         if (!isMounted) return;
 
         // Map API resources to UI format
-        const mappedResources = apiResources.map(resource => {
+        const mappedResources = await Promise.all(apiResources.map(async resource => {
           // Handle rates - it's an array of rate objects
           let pricingDisplay = 'Free of Charge';
           if (resource.metadata?.rates && Array.isArray(resource.metadata.rates) && resource.metadata.rates.length > 0) {
-            // Use the first rate's price_name or price
+            // Use the first rate's price or fallback to price_name
             const firstRate = resource.metadata.rates[0];
-            if (firstRate.price_name) {
-              pricingDisplay = firstRate.price_name;
-            } else if (firstRate.price !== undefined) {
+            if (firstRate.price !== undefined) {
               pricingDisplay = `$${firstRate.price}`;
+            } else if (firstRate.price_name) {
+              pricingDisplay = firstRate.price_name;
+            }
+          }
+
+          // Load resource features from backend
+          let resourceFeatures = [];
+          const mongoId = resource.mongo_id || resource.metadata?.mongo_id;
+          if (mongoId) {
+            try {
+              const featureRes = await fetch(`${BASE_URL}/resource/${mongoId}`);
+              if (featureRes.ok) {
+                const featureData = await featureRes.json();
+                
+                // Extract enabled features from features, amenities, security
+                const groups = ['features', 'amenities', 'security'];
+                groups.forEach(group => {
+                  const obj = featureData[group] || {};
+                  Object.entries(obj).forEach(([key, value]) => {
+                    if (value && value.enabled === true) {
+                      // Convert snake_case to readable format
+                      const featureName = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                      resourceFeatures.push(featureName);
+                    }
+                  });
+                });
+              }
+            } catch (e) {
+              console.warn(`Could not load features for ${resource.name}:`, e);
             }
           }
 
@@ -636,17 +688,26 @@ export default function Bookings() {
             name: resource.name,
             capacity: resource.metadata?.capacity || resource.max_simultaneous_bookings || 1,
             pricing: pricingDisplay,
-            type: resource.metadata?.category || 'Resource',
+            type: formatCategoryName(resource.metadata?.category) || 'Resource',
             note: resource.metadata?.resource_details?.note || '',
             amenities: resource.metadata?.resource_details?.description || 'Standard amenities',
             image: resource.metadata?.photo_url || 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=400&h=300&fit=crop',
             mongoId: resource.mongo_id || resource.metadata?.mongo_id || null,
+            features: resourceFeatures, // Add features array
             // Pass through full resource data
             ...resource
           };
-        });
+        }));
 
         setResources(mappedResources);
+        
+        // Build unique feature list from all resources
+        const allFeatures = new Set();
+        mappedResources.forEach(resource => {
+          resource.features.forEach(feature => allFeatures.add(feature));
+        });
+        setAvailableFeatures(Array.from(allFeatures).sort());
+        
         // Build resource categories from API data
         const categories = Array.from(new Set(mappedResources.map(r => r.type))).filter(Boolean).sort();
         setResourceOptions(['All Resources', ...categories]);
@@ -670,7 +731,17 @@ export default function Bookings() {
   // Check resource availability when date/time changes
   useEffect(() => {
     const checkAvailability = async () => {
-      if (!selectedDate || !startTime || !endTime || resources.length === 0) return;
+      if (!selectedDate || !startTime || !endTime || resources.length === 0) {
+        // If no date/time filters are set, make all resources available
+        if (resources.length > 0 && (!selectedDate || !startTime || !endTime)) {
+          const allAvailable = {};
+          resources.forEach(resource => {
+            allAvailable[resource.id] = true;
+          });
+          setResourceAvailability(allAvailable);
+        }
+        return;
+      }
       
       try {
         // Get all bookings
@@ -830,6 +901,27 @@ export default function Bookings() {
     return dates;
   };
   
+  // Get calendar header text based on view type
+  const getCalendarHeaderText = () => {
+    if (calendarView === 'Week') {
+      const weekStart = currentViewDate.startOf('week');
+      const weekEnd = currentViewDate.endOf('week');
+      if (weekStart.month === weekEnd.month) {
+        // Same month: "Nov 17 - 23, 2025"
+        return `${weekStart.toFormat('MMM d')} - ${weekEnd.toFormat('d, yyyy')}`;
+      } else {
+        // Different months: "Nov 30 - Dec 6, 2025"
+        return `${weekStart.toFormat('MMM d')} - ${weekEnd.toFormat('MMM d, yyyy')}`;
+      }
+    } else if (calendarView === 'Day') {
+      // "November 18, 2025"
+      return currentViewDate.toFormat('MMMM d, yyyy');
+    } else {
+      // Month and 30 days: "November 2025" (no change)
+      return currentViewDate.toFormat('MMMM yyyy');
+    }
+  };
+
   // Navigation handlers
   const goToToday = () => {
     const now = DateTime.now();
@@ -875,22 +967,32 @@ export default function Bookings() {
     return calendarBookings
       .filter(booking => {
         if (!booking.starts_at || booking.is_canceled) return false;
-        const bookingDate = new Date(booking.starts_at).toISOString().split('T')[0];
+        const tz = booking.location?.time_zone || 'Asia/Hong_Kong';
+        const startDt = DateTime.fromISO(booking.starts_at).setZone(tz);
+        const bookingDate = startDt.toFormat('yyyy-LL-dd');
         return bookingDate === dateString;
       })
       .map(booking => {
-        const startTime = new Date(booking.starts_at);
-        const hours = startTime.getHours();
-        const minutes = startTime.getMinutes();
-        const ampm = hours >= 12 ? 'pm' : 'am';
-        const displayHours = hours % 12 || 12;
-        const timeStr = `${displayHours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')} ${ampm}`;
+        const tz = booking.location?.time_zone || 'Asia/Hong_Kong';
+        const startDt = DateTime.fromISO(booking.starts_at).setZone(tz);
+        const endDt = booking.ends_at
+          ? DateTime.fromISO(booking.ends_at).setZone(tz)
+          : null;
+
+        const formatTime = (dt) => {
+          // 12-hour format with am/pm, consistent with rest of UI
+          return dt.toFormat('hh:mm a').toLowerCase();
+        };
+
+        const startTimeStr = formatTime(startDt);
+        const endTimeStr = endDt ? formatTime(endDt) : null;
+        const timeStr = endTimeStr ? `${startTimeStr} - ${endTimeStr}` : startTimeStr;
         
         return {
           name: booking.resource?.name || 'Resource',
           time: timeStr,
           id: booking.id,
-          customerName: booking.metadata?.customer_name || 'Guest'
+          customerName: booking.metadata?.customer_name || 'Guest',
         };
       });
   };
@@ -986,13 +1088,35 @@ export default function Bookings() {
                 {/* Date */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2" style={{ fontFamily: 'Inter' }}>
-                    Date
+                    Date 
                   </label>
                   <div className="relative">
                     <input
-                      type="date"
-                      value={selectedDate}
-                      onChange={(e) => setSelectedDate(e.target.value)}
+                      type="text"
+                      value={displayDate}
+                      onChange={(e) => {
+                        let value = e.target.value.replace(/[^0-9\/]/g, '');
+                        
+                        // Auto-format as user types
+                        if (value.length <= 2) {
+                          setDisplayDate(value);
+                        } else if (value.length <= 5) {
+                          setDisplayDate(value.slice(0, 2) + '/' + value.slice(2));
+                        } else {
+                          setDisplayDate(value.slice(0, 2) + '/' + value.slice(2, 4) + '/' + value.slice(4, 8));
+                        }
+                        
+                        // Convert to internal format when complete
+                        if (value.replace(/\//g, '').length === 8) {
+                          const formatted = value.slice(0, 2) + '/' + value.slice(2, 4) + '/' + value.slice(4, 8);
+                          const isoDate = parseDDMMYYYYToISO(formatted);
+                          if (isoDate) {
+                            setSelectedDate(isoDate);
+                          }
+                        }
+                      }}
+                      placeholder="DD/MM/YYYY"
+                      maxLength="10"
                       className="w-44 px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                       style={{ fontFamily: 'Inter' }}
                     />
@@ -1031,6 +1155,23 @@ export default function Bookings() {
                       />
                     </div>
                   </div>
+                </div>
+                
+                {/* Clear Filters Button */}
+                <div className="flex items-end">
+                  <button
+                    onClick={() => {
+                      setSelectedDate(today.toFormat('yyyy-LL-dd'));
+                      setDisplayDate(today.toFormat('dd/LL/yyyy'));
+                      setStartTime('');
+                      setEndTime('');
+                      setResourceAvailability({});
+                    }}
+                    className="px-4 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    style={{ fontFamily: 'Inter' }}
+                  >
+                    Clear Filters
+                  </button>
                 </div>
               </div>
 
@@ -1077,23 +1218,29 @@ export default function Bookings() {
                           Features {selectedFeatures.length > 0 && `(${selectedFeatures.length} selected)`}
                         </label>
                         <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg p-3 bg-white space-y-2">
-                          {['Projector', 'Whiteboard', 'Video Conference', 'WiFi', 'Air Conditioning', 'Coffee Machine', 'TV Screen', 'Microphone', 'Sound System', 'Parking'].map((feature) => (
-                            <label key={feature} className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 p-1 rounded">
-                              <input
-                                type="checkbox"
-                                checked={selectedFeatures.includes(feature)}
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    setSelectedFeatures([...selectedFeatures, feature]);
-                                  } else {
-                                    setSelectedFeatures(selectedFeatures.filter(f => f !== feature));
-                                  }
-                                }}
-                                className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                              />
-                              <span className="text-sm text-gray-700" style={{ fontFamily: 'Inter' }}>{feature}</span>
-                            </label>
-                          ))}
+                          {availableFeatures.length > 0 ? (
+                            availableFeatures.map((feature) => (
+                              <label key={feature} className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 p-1 rounded">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedFeatures.includes(feature)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedFeatures([...selectedFeatures, feature]);
+                                    } else {
+                                      setSelectedFeatures(selectedFeatures.filter(f => f !== feature));
+                                    }
+                                  }}
+                                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                                />
+                                <span className="text-sm text-gray-700" style={{ fontFamily: 'Inter' }}>{feature}</span>
+                              </label>
+                            ))
+                          ) : (
+                            <div className="text-sm text-gray-500 py-2" style={{ fontFamily: 'Inter' }}>
+                              Loading features...
+                            </div>
+                          )}
                         </div>
                       </div>
                       
@@ -1153,8 +1300,8 @@ export default function Bookings() {
                 >
                   <ChevronLeft className="w-5 h-5 text-gray-600" />
                 </button>
-                <span className="text-lg font-semibold text-gray-900 min-w-[150px] text-center" style={{ fontFamily: 'Inter' }}>
-                  {currentViewDate.toFormat('MMMM yyyy')}
+                <span className="text-lg font-semibold text-gray-900 min-w-[200px] text-center" style={{ fontFamily: 'Inter' }}>
+                  {getCalendarHeaderText()}
                 </span>
                 <button 
                   onClick={goToNext}
@@ -1208,13 +1355,10 @@ export default function Bookings() {
                   // Filter by features (if any selected)
                   if (selectedFeatures.length > 0) {
                     // Check if resource has ALL the selected features
-                    // This is placeholder logic - in real implementation, check resource metadata for features
-                    // For now, we show all resources (backend needs to provide feature data in resource metadata)
-                    // TODO: When backend provides feature data, check:
-                    // const hasAllFeatures = selectedFeatures.every(feature => 
-                    //   r.metadata?.features?.includes(feature)
-                    // );
-                    // if (!hasAllFeatures) return false;
+                    const hasAllFeatures = selectedFeatures.every(feature => 
+                      r.features && r.features.includes(feature)
+                    );
+                    if (!hasAllFeatures) return false;
                   }
                   
                   return true;
