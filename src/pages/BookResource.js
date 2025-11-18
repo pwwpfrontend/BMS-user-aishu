@@ -261,7 +261,7 @@ export default function BookResource() {
     }
     
     return {
-      location_id: '9cacb96e-65d7-44e2-a754-3a405c072250', // CORRECTED: CUHK InnoPort location ID
+      location_id: 'ca5b0e21-fce7-49a2-929d-5fb4463abaa7', // CORRECTED: CUHK InnoPort location ID
       resource_id: resource?.id || '',
       service_id: '',
       starts_at: '',
